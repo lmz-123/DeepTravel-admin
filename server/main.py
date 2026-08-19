@@ -41,7 +41,7 @@ app = FastAPI(title="简地内容中台 API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
