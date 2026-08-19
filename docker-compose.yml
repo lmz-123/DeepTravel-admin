@@ -1,0 +1,26 @@
+services:
+  admin-web:
+    build: .
+    ports:
+      - "3000:3000"
+    depends_on:
+      admin-api:
+        condition: service_healthy
+
+  admin-api:
+    build: ./server
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      MEDIA_ROOT: /data/media
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-30}
+    ports:
+      - "5100:5100"
+    volumes:
+      - ${MEDIA_HOST_PATH:-./media}:/data/media
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os, urllib.request; req=urllib.request.Request('http://localhost:5100/api/admin/health', headers={'Authorization': 'Bearer '+os.environ['ADMIN_TOKEN']}); urllib.request.urlopen(req)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
