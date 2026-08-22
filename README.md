@@ -1,6 +1,6 @@
 # DeepTravel 独立内容中台
 
-独立管理 DeepTravel 的城市、路线、故事、问题与媒体资源，并提供实时运行日志控制台。管理 Web 与 FastAPI 管理服务分别部署；管理服务连接 DeepTravel 现有 MySQL，不复制业务内容。
+独立管理 DeepTravel 的城市、路线、故事、问题与媒体资源，并提供实时运行日志控制台。管理 Web 与 FastAPI 管理服务分别部署；管理服务连接 DeepTravel 现有 MySQL，不复制业务内容。新增城市和路线通过通用内容包导入、审核和显式发布，不需要修改客户端或旅行 API。
 
 ## 运行结构
 
@@ -9,6 +9,9 @@
 - MySQL：复用 DeepTravel 数据库；管理服务仅额外拥有 `client_runtime_logs` 表。
 - 后端日志：管理服务通过配置白名单只读跟随 Docker 容器 stdout/stderr。
 - 客户端日志：Flutter 通过独立接收令牌批量提交结构化事件，服务端脱敏后写入 MySQL。
+- 媒体与旁白：支持本地存储或阿里云 OSS；旁白可生成三个 MiniMax 情感版本，试听批准后才绑定正式内容。
+
+路线生命周期严格为 `草稿 → 待审核 → 已审核·未发布 → 已发布 → 已归档`。普通编辑不会制造发布时间，旅行端只会看到显式发布且带发布时间的路线。
 
 ## 服务器部署
 
@@ -135,6 +138,15 @@ npm run lint
 docker compose build admin-api
 docker compose run --rm --no-deps admin-api python -m unittest discover -s tests -v
 ```
+
+MiniMax 真实试听需要显式提供凭证，默认测试不会产生费用：
+
+```bash
+cd server
+PYTHONPATH=. python ../tools/smoke_minimax_narration.py
+```
+
+试听判断标准见 `docs/narration-listening-checklist.md`。OSS 和 MiniMax 密钥只放在服务器 `.env`，不要提交到仓库。
 
 ## 回滚
 

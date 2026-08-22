@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -28,7 +28,7 @@ class RouteInput(BaseModel):
     theme: str = Field(min_length=1, max_length=80)
     hero_image: str = Field(min_length=1, max_length=255)
     is_featured: bool = False
-    content_status: str = Field(default="draft", max_length=40)
+    content_status: Literal["draft", "in_review", "verified", "published", "archived"] = "draft"
     published_at: datetime | None = None
 
 

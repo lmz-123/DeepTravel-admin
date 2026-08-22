@@ -14,13 +14,14 @@ os.environ["CLIENT_LOG_INGEST_TOKEN"] = "client-test-token"
 os.environ["MEDIA_ROOT"] = str(Path(_TEMP_DIR.name) / "media")
 os.environ["BACKEND_LOGS_ENABLED"] = "false"
 os.environ["LOG_SOURCES"] = "travel-api=deeptravel-api-1"
+os.environ["NARRATION_PROVIDER"] = "fake"
 
 from fastapi.testclient import TestClient  # noqa: E402
 from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 import main  # noqa: E402
-from models import Base, ClientRuntimeLog, Journey, MediaAsset  # noqa: E402
+from models import Base, ClientRuntimeLog, Journey, MediaAsset, StoryFragment  # noqa: E402
 from runtime_logs.docker_source import DockerFrameDecoder, DockerLogSource, parse_docker_line  # noqa: E402
 from runtime_logs.normalization import (  # noqa: E402
     NormalizationLimits,
@@ -272,9 +273,19 @@ class FragmentedContentApiTests(unittest.TestCase):
         self.assertEqual(repeated.status_code, 201, repeated.text)
         self.assertTrue(repeated.json()["idempotent"])
 
+        submitted = self.client.post("/api/admin/routes/route-test/submit-review", headers=self.headers)
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        self.assertEqual(submitted.json()["route"]["content_status"], "in_review")
+        verified = self.client.post("/api/admin/routes/route-test/verify", headers=self.headers)
+        self.assertEqual(verified.status_code, 200, verified.text)
+        self.assertEqual(verified.json()["route"]["content_status"], "verified")
+        self.assertFalse(verified.json()["route"]["is_public_visible"])
         published = self.client.post("/api/admin/routes/route-test/publish", headers=self.headers)
         self.assertEqual(published.status_code, 200, published.text)
         self.assertTrue(published.json()["validation"]["valid"])
+        self.assertTrue(published.json()["route"]["is_public_visible"])
+        invalid_repeat = self.client.post("/api/admin/routes/route-test/publish", headers=self.headers)
+        self.assertEqual(invalid_repeat.status_code, 409)
 
         with main.SessionLocal() as db:
             db.add(Journey(id="journey-test", route_id="route-test", status="active"))
@@ -294,8 +305,102 @@ class FragmentedContentApiTests(unittest.TestCase):
         imported = self.client.post("/api/admin/fragmented-routes/import", headers=self.headers, json=payload)
         self.assertEqual(imported.status_code, 201, imported.text)
         self.assertFalse(imported.json()["validation"]["valid"])
-        published = self.client.post("/api/admin/routes/invalid-route/publish", headers=self.headers)
-        self.assertEqual(published.status_code, 422, published.text)
+        submitted = self.client.post("/api/admin/routes/invalid-route/submit-review", headers=self.headers)
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        verified = self.client.post("/api/admin/routes/invalid-route/verify", headers=self.headers)
+        self.assertEqual(verified.status_code, 422, verified.text)
+
+    def test_three_narration_previews_do_not_bind_until_approval(self):
+        imported = self.client.post("/api/admin/fragmented-routes/import", headers=self.headers, json=self.payload())
+        self.assertEqual(imported.status_code, 201, imported.text)
+        before = self.client.get("/api/admin/routes/route-test/content", headers=self.headers).json()
+        old_audio = before["fragments"][0]["audio_path"]
+
+        generated = self.client.post(
+            "/api/admin/fragments/fragment-one/narration/previews",
+            headers=self.headers,
+            json={},
+        )
+        self.assertEqual(generated.status_code, 201, generated.text)
+        previews = generated.json()["previews"]
+        self.assertEqual(len(previews), 3)
+        self.assertTrue(all(item["status"] == "ready" for item in previews))
+        unchanged = self.client.get("/api/admin/routes/route-test/content", headers=self.headers).json()
+        self.assertEqual(unchanged["fragments"][0]["audio_path"], old_audio)
+
+        audio = self.client.get(f"/api/admin{previews[0]['playback_path']}", headers=self.headers)
+        self.assertEqual(audio.status_code, 200)
+        approved = self.client.post(
+            f"/api/admin/narration/previews/{previews[0]['id']}/approve",
+            headers=self.headers,
+        )
+        self.assertEqual(approved.status_code, 200, approved.text)
+        changed = self.client.get("/api/admin/routes/route-test/content", headers=self.headers).json()
+        self.assertTrue(changed["fragments"][0]["audio_path"].startswith("public/narration/fragment-one/"))
+
+    def test_stale_narration_preview_cannot_replace_current_script(self):
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
+        )
+        self.assertEqual(imported.status_code, 201, imported.text)
+        generated = self.client.post(
+            "/api/admin/fragments/fragment-one/narration/previews",
+            headers=self.headers,
+            json={},
+        ).json()["previews"]
+        with main.SessionLocal() as db:
+            fragment = db.get(StoryFragment, "fragment-one")
+            fragment.narration_script = "编辑已经修改了这段文字稿。"
+            fragment.transcript = fragment.narration_script
+            db.commit()
+
+        rejected = self.client.post(
+            f"/api/admin/narration/previews/{generated[0]['id']}/approve",
+            headers=self.headers,
+        )
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+
+    def test_same_checksum_assets_share_object_without_unsafe_deletion(self):
+        first = self.client.post(
+            "/api/admin/media",
+            headers=self.headers,
+            data={"key": "shared-a"},
+            files={"file": ("same.mp3", b"same-audio", "audio/mpeg")},
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+        with main.SessionLocal() as db:
+            original = db.get(MediaAsset, "shared-a")
+            now = datetime.now(UTC)
+            db.add(
+                MediaAsset(
+                    key="shared-b",
+                    storage_path="legacy/shared-alias.mp3",
+                    mime_type="audio/mpeg",
+                    storage_provider=original.storage_provider,
+                    object_key=original.object_key,
+                    canonical_url=original.canonical_url,
+                    visibility="public",
+                    size_bytes=original.size_bytes,
+                    checksum_sha256=original.checksum_sha256,
+                    metadata_json={"legacy_alias": True},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            db.commit()
+
+        deleted = self.client.delete(
+            "/api/admin/media/shared-a", headers=self.headers
+        )
+        self.assertEqual(deleted.status_code, 204, deleted.text)
+        surviving = self.client.get(
+            "/api/admin/media", headers=self.headers
+        ).json()
+        shared_b = next(item for item in surviving if item["key"] == "shared-b")
+        object_path = Path(_TEMP_DIR.name) / "media" / shared_b["object_key"]
+        self.assertTrue(object_path.is_file())
 
 
 class RuntimeLogApiTests(unittest.TestCase):

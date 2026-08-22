@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
 import re
-import shutil
 import time
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
@@ -33,12 +33,20 @@ from models import (
     Journey,
     JourneyAnswer,
     MediaAsset,
+    NarrationPreview,
     PhotoMission,
     Route,
     Stop,
     StoryArc,
     StoryFragment,
     TriggerRegion,
+)
+from object_storage import AlibabaOssObjectStorage, LocalObjectStorage, StoredObject
+from narration import (
+    DeterministicNarrationSynthesizer,
+    MiniMaxNarrationSynthesizer,
+    NarrationRequest,
+    NarrationSynthesisError,
 )
 from runtime_logs.docker_source import DockerLogSource
 from runtime_logs.normalization import NormalizationLimits, normalize_event, normalize_level
@@ -62,6 +70,22 @@ class Settings(BaseSettings):
     media_root: str = "./media"
     cors_origins: str = "http://localhost:3000"
     max_upload_mb: int = 30
+    object_storage_provider: str = "local"
+    oss_region: str = ""
+    oss_endpoint: str = ""
+    oss_public_bucket: str = ""
+    oss_private_bucket: str = ""
+    oss_public_base_url: str = ""
+    oss_access_key_id: str = ""
+    oss_access_key_secret: str = ""
+    oss_signed_url_ttl_seconds: int = 300
+    narration_provider: str = "minimax"
+    minimax_api_key: str = ""
+    minimax_t2a_endpoint: str = "https://api.minimaxi.com/v1/t2a_v2"
+    minimax_t2a_model: str = "speech-2.8-hd"
+    minimax_voice_id: str = "Chinese (Mandarin)_Gentleman"
+    minimax_timeout_seconds: float = 45.0
+    narration_preview_ttl_hours: int = 24
     client_log_ingest_token: str = "dev-client-logs-change-me"
     client_log_max_request_kb: int = 128
     client_log_max_batch: int = 50
@@ -100,6 +124,41 @@ engine = create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=1
 SessionLocal = sessionmaker(engine, expire_on_commit=False)
 media_root = Path(settings.media_root).resolve()
 media_root.mkdir(parents=True, exist_ok=True)
+if settings.object_storage_provider == "oss":
+    if not settings.oss_region or not settings.oss_public_bucket or not settings.oss_private_bucket or not settings.oss_public_base_url:
+        raise RuntimeError("OSS 模式必须配置 OSS_REGION、OSS_PUBLIC_BUCKET、OSS_PRIVATE_BUCKET 与 OSS_PUBLIC_BASE_URL")
+    public_object_storage = AlibabaOssObjectStorage(
+        region=settings.oss_region,
+        bucket=settings.oss_public_bucket,
+        endpoint=settings.oss_endpoint,
+        public_base_url=settings.oss_public_base_url,
+        access_key_id=settings.oss_access_key_id,
+        access_key_secret=settings.oss_access_key_secret,
+    )
+    private_object_storage = AlibabaOssObjectStorage(
+        region=settings.oss_region,
+        bucket=settings.oss_private_bucket,
+        endpoint=settings.oss_endpoint,
+        public_base_url=settings.oss_public_base_url,
+        access_key_id=settings.oss_access_key_id,
+        access_key_secret=settings.oss_access_key_secret,
+    )
+elif settings.object_storage_provider == "local":
+    public_object_storage = LocalObjectStorage(str(media_root))
+    private_object_storage = LocalObjectStorage(str(media_root / "private-previews"))
+else:
+    raise RuntimeError("OBJECT_STORAGE_PROVIDER 仅支持 local 或 oss")
+if settings.narration_provider == "fake":
+    narration_synthesizer = DeterministicNarrationSynthesizer()
+elif settings.narration_provider == "minimax":
+    narration_synthesizer = MiniMaxNarrationSynthesizer(
+        api_key=settings.minimax_api_key,
+        endpoint=settings.minimax_t2a_endpoint,
+        model=settings.minimax_t2a_model,
+        timeout_seconds=settings.minimax_timeout_seconds,
+    )
+else:
+    raise RuntimeError("NARRATION_PROVIDER 仅支持 minimax 或 fake")
 normalization_limits = NormalizationLimits(
     message_chars=max(256, settings.log_line_max_chars),
     context_string_chars=max(128, settings.log_context_max_chars),
@@ -202,6 +261,7 @@ def route_dict(item: Route, city_name: str | None = None, stop_count: int = 0) -
         "is_featured": item.is_featured,
         "content_status": item.content_status,
         "published_at": iso(item.published_at),
+        "is_public_visible": item.content_status == "published" and item.published_at is not None,
         "managed_package_id": item.managed_package_id,
         "managed_package_version": item.managed_package_version,
         "stop_count": stop_count,
@@ -258,6 +318,7 @@ def health(_: Auth, db: Db):
         "status": "ok",
         "database": "connected",
         "media_root": str(media_root),
+        "media_storage": public_object_storage.provider,
         "client_log_storage": "connected",
         "backend_logs": "available" if settings.backend_logs_enabled and docker_log_source.available else "unavailable",
     }
@@ -483,7 +544,12 @@ def dashboard(_: Auth, db: Db):
     counts = {
         "cities": db.scalar(select(func.count()).select_from(City)) or 0,
         "routes": db.scalar(select(func.count()).select_from(Route)) or 0,
-        "published_routes": db.scalar(select(func.count()).select_from(Route).where(Route.published_at.is_not(None))) or 0,
+        "published_routes": db.scalar(
+            select(func.count())
+            .select_from(Route)
+            .where(Route.content_status == "published", Route.published_at.is_not(None))
+        )
+        or 0,
         "stops": db.scalar(select(func.count()).select_from(Stop)) or 0,
         "challenges": db.scalar(select(func.count()).select_from(Challenge)) or 0,
         "media": db.scalar(select(func.count()).select_from(MediaAsset)) or 0,
@@ -566,12 +632,8 @@ def create_route(payload: RouteInput, _: Auth, db: Db):
     if not db.get(City, payload.city_id):
         raise HTTPException(400, "所选城市不存在")
     values = payload.model_dump()
-    if values["content_status"] == "published":
-        values["content_status"] = "verified"
-    if values["content_status"] == "verified" and not values["published_at"]:
-        values["published_at"] = datetime.now(UTC)
-    elif values["content_status"] != "verified":
-        values["published_at"] = None
+    values["content_status"] = "draft"
+    values["published_at"] = None
     item = Route(id=str(uuid4()), **values)
     db.add(item)
     commit_or_conflict(db, "路线标识已存在")
@@ -586,12 +648,8 @@ def update_route(item_id: str, payload: RouteInput, _: Auth, db: Db):
     if item.managed_package_id and _published_route_locked(db, item):
         raise HTTPException(409, "published_route_locked")
     values = payload.model_dump()
-    if values["content_status"] == "published":
-        values["content_status"] = "verified"
-    if values["content_status"] == "verified" and not values["published_at"]:
-        values["published_at"] = item.published_at or datetime.now(UTC)
-    elif values["content_status"] != "verified":
-        values["published_at"] = None
+    values["content_status"] = item.content_status
+    values["published_at"] = item.published_at
     for key, value in values.items():
         setattr(item, key, value)
     commit_or_conflict(db, "路线标识或字段与现有内容冲突")
@@ -723,9 +781,14 @@ def list_media(request: Request, _: Auth, db: Db, q: str = ""):
             "key": item.key,
             "storage_path": item.storage_path,
             "mime_type": item.mime_type,
+            "storage_provider": item.storage_provider,
+            "object_key": item.object_key,
+            "canonical_url": item.canonical_url,
+            "size_bytes": item.size_bytes,
+            "checksum_sha256": item.checksum_sha256,
             "created_at": iso(item.created_at),
             "updated_at": iso(item.updated_at),
-            "preview_url": f"{base}/media/{item.storage_path}",
+            "preview_url": item.canonical_url or f"{base}/media/{item.object_key or item.storage_path}",
         }
         for item in db.scalars(statement)
     ]
@@ -743,36 +806,50 @@ def upload_media(
     allowed_prefixes = ("image/", "audio/")
     if not file.content_type.startswith(allowed_prefixes):
         raise HTTPException(415, "仅支持图片和音频文件")
+    payload = file.file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+    if len(payload) > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(413, f"文件不能超过 {settings.max_upload_mb}MB")
     safe_name = re.sub(r"[^a-zA-Z0-9._-]", "-", Path(file.filename).name).strip(".-") or "asset"
     asset_key = re.sub(r"[^a-zA-Z0-9_-]", "-", key.strip()).strip("-") or Path(safe_name).stem
+    checksum = hashlib.sha256(payload).hexdigest()
+    existing = db.get(MediaAsset, asset_key)
+    if existing:
+        if existing.checksum_sha256 == checksum:
+            return {"key": existing.key, "storage_path": existing.storage_path, "mime_type": existing.mime_type, "idempotent": True}
+        raise HTTPException(409, "资源标识已存在；请更换标识，避免已发布内容引用被静默替换")
     now = datetime.now(UTC)
-    folder = Path("uploads") / now.strftime("%Y") / now.strftime("%m")
-    storage_path = (folder / f"{uuid4().hex[:10]}-{safe_name}").as_posix()
-    destination = (media_root / storage_path).resolve()
-    if media_root != destination and media_root not in destination.parents:
-        raise HTTPException(400, "非法文件路径")
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    with destination.open("wb") as target:
-        shutil.copyfileobj(file.file, target)
-    if destination.stat().st_size > settings.max_upload_mb * 1024 * 1024:
-        destination.unlink(missing_ok=True)
-        raise HTTPException(413, f"文件不能超过 {settings.max_upload_mb}MB")
-    item = db.get(MediaAsset, asset_key)
-    if item:
-        item.storage_path = storage_path
-        item.mime_type = file.content_type
-        item.updated_at = now
+    suffix = Path(safe_name).suffix.lower()
+    object_key = f"public/content/{now:%Y/%m}/{checksum}{suffix}"
+    uploaded_now = False
+    if not public_object_storage.exists(object_key):
+        stored = public_object_storage.put(object_key, payload, file.content_type)
+        uploaded_now = True
     else:
-        item = MediaAsset(
-            key=asset_key,
-            storage_path=storage_path,
-            mime_type=file.content_type,
-            created_at=now,
-            updated_at=now,
-        )
-        db.add(item)
-    commit_or_conflict(db, "资源标识或存储路径冲突")
-    return {"key": item.key, "storage_path": item.storage_path, "mime_type": item.mime_type}
+        canonical = public_object_storage.public_url(object_key)
+        stored = StoredObject(public_object_storage.provider, object_key, canonical)
+    storage_path = object_key
+    item = MediaAsset(
+        key=asset_key,
+        storage_path=storage_path,
+        mime_type=file.content_type,
+        storage_provider=stored.provider,
+        object_key=stored.object_key,
+        canonical_url=stored.canonical_url if stored.provider == "oss" else None,
+        visibility="public",
+        size_bytes=len(payload),
+        checksum_sha256=checksum,
+        metadata_json={"original_filename": safe_name},
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(item)
+    try:
+        commit_or_conflict(db, "资源标识或存储路径冲突")
+    except Exception:
+        if uploaded_now:
+            public_object_storage.delete(object_key)
+        raise
+    return {"key": item.key, "storage_path": item.storage_path, "mime_type": item.mime_type, "storage_provider": item.storage_provider, "canonical_url": item.canonical_url}
 
 
 @app.delete("/api/admin/media/{asset_key}", status_code=204)
@@ -788,21 +865,210 @@ def delete_media(asset_key: str, _: Auth, db: Db):
     )
     if references:
         raise HTTPException(409, f"该资源正在被 {references} 处内容使用，不能删除")
-    candidate = (media_root / item.storage_path).resolve()
-    if media_root == candidate or media_root in candidate.parents:
-        candidate.unlink(missing_ok=True)
+    shared_object = (
+        db.scalar(
+            select(func.count())
+            .select_from(MediaAsset)
+            .where(
+                MediaAsset.object_key == item.object_key,
+                MediaAsset.key != item.key,
+            )
+        )
+        or 0
+    )
+    if item.object_key and not shared_object:
+        public_object_storage.delete(item.object_key)
+    elif not item.object_key and item.storage_provider == "local":
+        candidate = (media_root / item.storage_path).resolve()
+        if media_root == candidate or media_root in candidate.parents:
+            candidate.unlink(missing_ok=True)
     db.delete(item)
     db.commit()
 
 
 @app.get("/media/{asset_path:path}")
 def serve_media(asset_path: str):
+    if public_object_storage.provider != "local":
+        raise HTTPException(404)
     candidate = (media_root / asset_path).resolve()
     if media_root != candidate and media_root not in candidate.parents:
         raise HTTPException(404)
     if not candidate.is_file():
         raise HTTPException(404)
     return FileResponse(candidate)
+
+
+def narration_preview_dict(item: NarrationPreview) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "fragment_id": item.fragment_id,
+        "transcript_hash": item.transcript_hash,
+        "provider": item.provider,
+        "model": item.model,
+        "voice_id": item.voice_id,
+        "emotion": item.emotion,
+        "speed": item.speed,
+        "pitch": item.pitch,
+        "pronunciation": item.pronunciation_json,
+        "status": item.status,
+        "error_code": item.error_code,
+        "metadata": item.metadata_json,
+        "created_at": iso(item.created_at),
+        "expires_at": iso(item.expires_at),
+        "approved_at": iso(item.approved_at),
+        "playback_path": f"/narration/previews/{item.id}/audio" if item.status in {"ready", "approved"} else None,
+    }
+
+
+@app.post("/api/admin/fragments/{fragment_id}/narration/previews", status_code=201)
+def generate_narration_previews(fragment_id: str, payload: dict[str, Any], _: Auth, db: Db):
+    fragment = db.get(StoryFragment, fragment_id)
+    if fragment is None:
+        raise HTTPException(404, "故事碎片不存在")
+    transcript = fragment.narration_script.strip()
+    if not transcript:
+        raise HTTPException(422, "旁白文字稿不能为空")
+    defaults = [
+        {"label": "沉静纪实", "emotion": "neutral", "speed": 0.92, "pitch": -1},
+        {"label": "温和导览", "emotion": "neutral", "speed": 1.0, "pitch": 0},
+        {"label": "故事张力", "emotion": "happy", "speed": 0.96, "pitch": 1},
+    ]
+    variants = payload.get("variants") or defaults
+    if not isinstance(variants, list) or not 3 <= len(variants) <= 5:
+        raise HTTPException(422, "一次需要生成 3 到 5 个试听版本")
+    pronunciation = tuple(str(item) for item in payload.get("pronunciation") or [])
+    transcript_hash = hashlib.sha256(transcript.encode()).hexdigest()
+    now = datetime.now(UTC)
+    previews: list[NarrationPreview] = []
+    for raw in variants:
+        variant = dict(raw)
+        preview_id = str(uuid4())
+        voice_id = str(variant.get("voice_id") or settings.minimax_voice_id)
+        emotion = str(variant.get("emotion") or "neutral")
+        speed = min(max(float(variant.get("speed", 1.0)), 0.5), 2.0)
+        pitch = min(max(int(variant.get("pitch", 0)), -12), 12)
+        preview = NarrationPreview(
+            id=preview_id,
+            fragment_id=fragment.id,
+            transcript_hash=transcript_hash,
+            provider=narration_synthesizer.provider,
+            model=narration_synthesizer.model,
+            voice_id=voice_id,
+            emotion=emotion,
+            speed=speed,
+            pitch=pitch,
+            pronunciation_json=list(pronunciation),
+            status="pending",
+            metadata_json={"label": str(variant.get("label") or emotion)},
+            created_at=now,
+            expires_at=now + timedelta(hours=max(1, settings.narration_preview_ttl_hours)),
+        )
+        try:
+            result = narration_synthesizer.synthesize(NarrationRequest(transcript, voice_id, emotion, speed, pitch, pronunciation))
+            object_key = f"private/narration-previews/{fragment.id}/{preview_id}.mp3"
+            private_object_storage.put(object_key, result.payload, result.mime_type)
+            preview.object_key = object_key
+            preview.status = "ready"
+            preview.metadata_json = {**preview.metadata_json, "mime_type": result.mime_type, "size_bytes": len(result.payload), "request_id": result.request_id}
+        except NarrationSynthesisError as error:
+            preview.status = "failed"
+            preview.error_code = error.code
+        except Exception:
+            logger.exception("Narration preview storage failed for fragment %s", fragment.id)
+            preview.status = "failed"
+            preview.error_code = "storage_unavailable"
+        db.add(preview)
+        previews.append(preview)
+    db.commit()
+    return {"previews": [narration_preview_dict(item) for item in previews]}
+
+
+@app.get("/api/admin/narration/previews/{preview_id}/audio")
+def stream_narration_preview(preview_id: str, _: Auth, db: Db):
+    preview = db.get(NarrationPreview, preview_id)
+    if preview is None or preview.status not in {"ready", "approved"} or not preview.object_key:
+        raise HTTPException(404, "试听音频不存在或已过期")
+    now = datetime.now(UTC)
+    if preview.expires_at.tzinfo is None:
+        now = now.replace(tzinfo=None)
+    if preview.expires_at < now and preview.status != "approved":
+        raise HTTPException(410, "试听音频已过期")
+    mime_type = str(preview.metadata_json.get("mime_type") or "audio/mpeg")
+    def chunks():
+        with private_object_storage.open(preview.object_key) as source:
+            while payload := source.read(64 * 1024):
+                yield payload
+    return StreamingResponse(chunks(), media_type=mime_type)
+
+
+@app.post("/api/admin/narration/previews/{preview_id}/approve")
+def approve_narration_preview(preview_id: str, _: Auth, db: Db):
+    preview = db.get(NarrationPreview, preview_id)
+    if preview is None or preview.status != "ready" or not preview.object_key:
+        raise HTTPException(409, "只有可试听版本能够批准")
+    fragment = db.get(StoryFragment, preview.fragment_id)
+    if fragment is None:
+        raise HTTPException(404, "故事碎片不存在")
+    transcript_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
+    if transcript_hash != preview.transcript_hash:
+        raise HTTPException(409, "文字稿已变化，请重新生成试听版本")
+    with private_object_storage.open(preview.object_key) as source:
+        audio = source.read()
+    version = re.sub(r"[^a-zA-Z0-9._-]", "-", fragment.script_version) or "v1"
+    object_key = f"public/narration/{fragment.id}/{transcript_hash[:16]}-{version}.mp3"
+    uploaded = False
+    try:
+        if not public_object_storage.exists(object_key):
+            public_object_storage.put(object_key, audio, "audio/mpeg")
+            uploaded = True
+        canonical_url = public_object_storage.public_url(object_key)
+        asset = db.scalar(select(MediaAsset).where(MediaAsset.object_key == object_key))
+        if asset is None:
+            now = datetime.now(UTC)
+            asset = MediaAsset(
+                key=f"narration-{fragment.id}-{transcript_hash[:12]}",
+                storage_path=object_key,
+                mime_type="audio/mpeg",
+                storage_provider=public_object_storage.provider,
+                object_key=object_key,
+                canonical_url=canonical_url if public_object_storage.provider == "oss" else None,
+                visibility="public",
+                size_bytes=len(audio),
+                checksum_sha256=hashlib.sha256(audio).hexdigest(),
+                metadata_json={"narration": {"preview_id": preview.id, "provider": preview.provider, "model": preview.model, "voice_id": preview.voice_id, "emotion": preview.emotion, "speed": preview.speed, "pitch": preview.pitch, "transcript_hash": preview.transcript_hash}},
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(asset)
+        fragment.audio_path = object_key
+        fragment.audio_mime_type = "audio/mpeg"
+        fragment.audio_size_bytes = len(audio)
+        preview.status = "approved"
+        preview.approved_at = datetime.now(UTC)
+        db.commit()
+    except Exception:
+        db.rollback()
+        if uploaded:
+            public_object_storage.delete(object_key)
+        raise
+    return {"preview": narration_preview_dict(preview), "asset": {"key": asset.key, "storage_path": asset.storage_path, "canonical_url": asset.canonical_url}}
+
+
+@app.post("/api/admin/narration/previews/cleanup")
+def cleanup_narration_previews(_: Auth, db: Db):
+    rows = list(db.scalars(select(NarrationPreview).where(NarrationPreview.expires_at < datetime.now(UTC), NarrationPreview.status != "approved")))
+    removed = 0
+    for item in rows:
+        if item.object_key:
+            try:
+                private_object_storage.delete(item.object_key)
+            except Exception:
+                logger.warning("Failed to delete expired narration preview %s", item.id)
+                continue
+        db.delete(item)
+        removed += 1
+    db.commit()
+    return {"removed": removed}
 
 
 def upsert(db: Session, model: type, identity: str, values: dict[str, Any]):
@@ -842,12 +1108,8 @@ def import_content(payload: dict[str, Any], _: Auth, db: Db):
             data = RouteInput.model_validate(raw)
             route_id = supplied_route_id or db.scalar(select(Route.id).where(Route.slug == data.slug)) or str(uuid4())
             values = data.model_dump()
-            if values["content_status"] == "published":
-                values["content_status"] = "verified"
-            if values["content_status"] == "verified" and not values["published_at"]:
-                values["published_at"] = datetime.now(UTC)
-            elif values["content_status"] != "verified":
-                values["published_at"] = None
+            values["content_status"] = "draft"
+            values["published_at"] = None
             upsert(db, Route, route_id, values)
             route_ids[data.slug] = route_id
             for nested in nested_stops:
@@ -903,7 +1165,7 @@ def _media_catalog(db: Session) -> dict[str, str]:
 
 
 def _published_route_locked(db: Session, route: Route) -> bool:
-    if route.published_at is None:
+    if route.content_status != "published" or route.published_at is None:
         return False
     return bool(
         db.scalar(select(func.count()).select_from(Journey).where(Journey.route_id == route.id))
@@ -1342,25 +1604,114 @@ def validate_route_content(route_id: str, _: Auth, db: Db):
     route = db.get(Route, route_id)
     if route is None:
         raise HTTPException(404, "路线不存在")
-    return validate_graph(_route_content(db, route), _media_catalog(db))
+    return _publication_validation(db, route)
+
+
+@app.post("/api/admin/routes/{route_id}/submit-review")
+def submit_route_review(route_id: str, _: Auth, db: Db):
+    route = _route_for_transition(db, route_id, {"draft"}, "只有草稿可以提交审核")
+    route.content_status = "in_review"
+    route.published_at = None
+    db.commit()
+    return {"route": route_dict(route), "validation": _publication_validation(db, route)}
+
+
+@app.post("/api/admin/routes/{route_id}/verify")
+def verify_route_content(route_id: str, _: Auth, db: Db):
+    route = _route_for_transition(db, route_id, {"in_review"}, "只有待审核路线可以通过审核")
+    result = _publication_validation(db, route)
+    if not result["valid"]:
+        raise HTTPException(422, detail={"code": "content_validation_failed", **result})
+    route.content_status = "verified"
+    route.published_at = None
+    db.commit()
+    return {"route": route_dict(route), "validation": result}
 
 
 @app.post("/api/admin/routes/{route_id}/publish")
 def publish_route_content(route_id: str, _: Auth, db: Db):
-    route = db.get(Route, route_id)
-    if route is None:
-        raise HTTPException(404, "路线不存在")
-    graph = _route_content(db, route)
-    result = validate_graph(graph, _media_catalog(db))
+    route = _route_for_transition(db, route_id, {"verified"}, "只有已审核路线可以发布")
+    result = _publication_validation(db, route)
     if not result["valid"]:
         raise HTTPException(422, detail={"code": "content_validation_failed", **result})
-    route.content_status = "verified"
+    route.content_status = "published"
     route.published_at = datetime.now(UTC)
     arc = db.scalar(select(StoryArc).where(StoryArc.route_id == route.id))
     if arc:
         arc.publication_decision = "field_test"
     db.commit()
     return {"route": route_dict(route), "validation": result}
+
+
+@app.post("/api/admin/routes/{route_id}/archive")
+def archive_route_content(route_id: str, _: Auth, db: Db):
+    route = _route_for_transition(db, route_id, {"published"}, "只有已发布路线可以归档")
+    route.content_status = "archived"
+    db.commit()
+    return {"route": route_dict(route)}
+
+
+def _route_for_transition(
+    db: Session, route_id: str, allowed: set[str], message: str
+) -> Route:
+    route = db.get(Route, route_id)
+    if route is None:
+        raise HTTPException(404, "路线不存在")
+    if route.content_status not in allowed:
+        raise HTTPException(
+            409,
+            detail={
+                "code": "invalid_route_transition",
+                "message": message,
+                "current_status": route.content_status,
+            },
+        )
+    return route
+
+
+def _publication_validation(db: Session, route: Route) -> dict[str, Any]:
+    graph = _route_content(db, route)
+    if graph["story_arc"] is not None:
+        result = validate_graph(graph, _media_catalog(db))
+        fragments = list(db.scalars(select(StoryFragment).where(StoryFragment.arc_id == graph["story_arc"]["id"])))
+        for index, fragment in enumerate(fragments):
+            has_candidates = db.scalar(select(func.count()).select_from(NarrationPreview).where(NarrationPreview.fragment_id == fragment.id, NarrationPreview.status.in_(["ready", "approved"]))) or 0
+            if not has_candidates:
+                continue
+            transcript_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
+            approved = db.scalar(select(NarrationPreview).where(NarrationPreview.fragment_id == fragment.id, NarrationPreview.status == "approved", NarrationPreview.transcript_hash == transcript_hash))
+            asset = db.scalar(select(MediaAsset).where(MediaAsset.storage_path == fragment.audio_path))
+            provenance = (asset.metadata_json.get("narration") if asset and isinstance(asset.metadata_json, dict) else None) or {}
+            if approved is None or provenance.get("preview_id") != approved.id or provenance.get("transcript_hash") != transcript_hash:
+                result["errors"].append({"path": f"fragments[{index}].audio_path", "code": "narration_not_approved", "message": "当前文字稿已有试听版本，发布前必须批准与文字稿一致的旁白"})
+        result["valid"] = not result["errors"]
+        return result
+    errors: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+    stops = list(db.scalars(select(Stop).where(Stop.route_id == route.id)))
+    if not stops:
+        errors.append(
+            {"path": "stops", "code": "stops_missing", "message": "路线至少需要一个站点"}
+        )
+    media = _media_catalog(db)
+    if route.hero_image not in media and not route.hero_image.startswith(("http://", "https://")):
+        errors.append(
+            {
+                "path": "route.hero_image",
+                "code": "media_missing",
+                "message": "路线封面未登记",
+            }
+        )
+    for index, stop in enumerate(stops):
+        if not stop.story_body.strip():
+            errors.append(
+                {
+                    "path": f"stops[{index}].story_body",
+                    "code": "story_missing",
+                    "message": "站点故事不能为空",
+                }
+            )
+    return {"valid": not errors, "errors": errors, "warnings": warnings}
 
 
 @app.post("/api/admin/fragmented-routes/import", status_code=201)
@@ -1375,22 +1726,23 @@ def import_fragmented_route(payload: dict[str, Any], _: Auth, db: Db):
         asset_key = str(media_data.get("key") or "").strip()
         storage_path = str(media_data.get("storage_path") or "").strip()
         mime_type = str(media_data.get("mime_type") or "").strip()
-        candidate = (media_root / storage_path).resolve()
         if not asset_key or not storage_path or not mime_type.startswith(("image/", "audio/")):
             raise HTTPException(422, "media 中的 key、storage_path 和图片/音频 MIME 必填")
-        if media_root != candidate and media_root not in candidate.parents:
-            raise HTTPException(422, f"非法媒体路径：{storage_path}")
-        if not candidate.is_file():
-            raise HTTPException(422, f"媒体文件不存在：{storage_path}")
         item = db.get(MediaAsset, asset_key)
-        path_owner = db.scalar(select(MediaAsset).where(MediaAsset.storage_path == storage_path))
+        path_owner = db.scalar(select(MediaAsset).where(or_(MediaAsset.storage_path == storage_path, MediaAsset.canonical_url == storage_path)))
         if item is not None and path_owner is not None and item.key != path_owner.key:
             raise HTTPException(409, f"媒体 key 与路径分别属于不同资源：{asset_key}")
         item = item or path_owner
         if item is None:
-            db.add(MediaAsset(key=asset_key, storage_path=storage_path, mime_type=mime_type, created_at=now, updated_at=now))
+            if public_object_storage.provider != "local":
+                raise HTTPException(422, f"请先在媒体库上传并登记资源：{asset_key}")
+            candidate = (media_root / storage_path).resolve()
+            if (media_root != candidate and media_root not in candidate.parents) or not candidate.is_file():
+                raise HTTPException(422, f"媒体文件不存在：{storage_path}")
+            db.add(MediaAsset(key=asset_key, storage_path=storage_path, mime_type=mime_type, storage_provider="local", object_key=storage_path, visibility="public", size_bytes=candidate.stat().st_size, metadata_json={}, created_at=now, updated_at=now))
         else:
-            item.storage_path = storage_path
+            if item.storage_path != storage_path and item.canonical_url != storage_path:
+                raise HTTPException(409, f"媒体路径与已登记资源不匹配：{asset_key}")
             item.mime_type = mime_type
             item.updated_at = now
     existing = db.scalar(select(Route).where(Route.managed_package_id == package_id))

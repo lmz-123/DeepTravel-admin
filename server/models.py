@@ -16,8 +16,37 @@ class MediaAsset(Base):
     key: Mapped[str] = mapped_column(String(120), primary_key=True)
     storage_path: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     mime_type: Mapped[str] = mapped_column(String(100))
+    storage_provider: Mapped[str] = mapped_column(String(20), default="local")
+    object_key: Mapped[str | None] = mapped_column(String(500), nullable=True, index=True)
+    canonical_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    visibility: Mapped[str] = mapped_column(String(20), default="public")
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    checksum_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class NarrationPreview(Base):
+    __tablename__ = "narration_previews"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    fragment_id: Mapped[str] = mapped_column(String(36), ForeignKey("story_fragments.id"), index=True)
+    transcript_hash: Mapped[str] = mapped_column(String(64), index=True)
+    provider: Mapped[str] = mapped_column(String(40))
+    model: Mapped[str] = mapped_column(String(80))
+    voice_id: Mapped[str] = mapped_column(String(120))
+    emotion: Mapped[str] = mapped_column(String(40), default="neutral")
+    speed: Mapped[float] = mapped_column(Float, default=1.0)
+    pitch: Mapped[int] = mapped_column(Integer, default=0)
+    pronunciation_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    object_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", index=True)
+    error_code: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class City(Base):
