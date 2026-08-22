@@ -17,10 +17,28 @@ services:
       MEDIA_ROOT: /data/media
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-30}
+      CLIENT_LOG_INGEST_TOKEN: ${CLIENT_LOG_INGEST_TOKEN}
+      CLIENT_LOG_MAX_REQUEST_KB: ${CLIENT_LOG_MAX_REQUEST_KB:-128}
+      CLIENT_LOG_MAX_BATCH: ${CLIENT_LOG_MAX_BATCH:-50}
+      CLIENT_LOG_RETENTION_DAYS: ${CLIENT_LOG_RETENTION_DAYS:-7}
+      CLIENT_LOG_MAX_ROWS: ${CLIENT_LOG_MAX_ROWS:-20000}
+      CLIENT_LOG_CLEANUP_BATCH: ${CLIENT_LOG_CLEANUP_BATCH:-1000}
+      BACKEND_LOGS_ENABLED: ${BACKEND_LOGS_ENABLED:-true}
+      DOCKER_SOCKET_PATH: /var/run/docker.sock
+      DOCKER_API_VERSION: ${DOCKER_API_VERSION:-v1.41}
+      LOG_SOURCES: ${LOG_SOURCES:-travel-api=deeptravel-api-1,admin-api=deeptravel-admin-admin-api-1}
+      LOG_TAIL_LIMIT: ${LOG_TAIL_LIMIT:-300}
+      LOG_LINE_MAX_CHARS: ${LOG_LINE_MAX_CHARS:-8000}
+      LOG_CONTEXT_MAX_CHARS: ${LOG_CONTEXT_MAX_CHARS:-1000}
+      LOG_HEARTBEAT_SECONDS: ${LOG_HEARTBEAT_SECONDS:-12}
+      LOG_CLIENT_POLL_SECONDS: ${LOG_CLIENT_POLL_SECONDS:-1}
+      LOG_STREAM_BATCH: ${LOG_STREAM_BATCH:-200}
+      LOG_MAX_STREAMS: ${LOG_MAX_STREAMS:-6}
     ports:
       - "5100:5100"
     volumes:
       - ${MEDIA_HOST_PATH:-./media}:/data/media
+      - ${DOCKER_SOCKET_HOST_PATH:-/var/run/docker.sock}:/var/run/docker.sock:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import os, urllib.request; req=urllib.request.Request('http://localhost:5100/api/admin/health', headers={'Authorization': 'Bearer '+os.environ['ADMIN_TOKEN']}); urllib.request.urlopen(req)"]
       interval: 10s

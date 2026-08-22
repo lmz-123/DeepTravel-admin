@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import hmac
-import os
+import logging
 import re
 import shutil
+import time
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -11,14 +14,26 @@ from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import create_engine, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from models import Challenge, City, Journey, JourneyAnswer, MediaAsset, Route, Stop
-from schemas import ChallengeInput, CityInput, RouteInput, StopInput
+from runtime_logs.docker_source import DockerLogSource
+from runtime_logs.normalization import NormalizationLimits, normalize_event, normalize_level
+from runtime_logs.storage import (
+    cleanup_client_logs,
+    ensure_client_log_schema,
+    persist_client_events,
+    query_client_events,
+)
+from runtime_logs.streaming import StreamLimiter, limited_stream, sse_message
+from schemas import ChallengeInput, CityInput, ClientLogBatch, RouteInput, StopInput
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -29,6 +44,37 @@ class Settings(BaseSettings):
     media_root: str = "./media"
     cors_origins: str = "http://localhost:3000"
     max_upload_mb: int = 30
+    client_log_ingest_token: str = "dev-client-logs-change-me"
+    client_log_max_request_kb: int = 128
+    client_log_max_batch: int = 50
+    client_log_retention_days: int = 7
+    client_log_max_rows: int = 20_000
+    client_log_cleanup_batch: int = 1_000
+    backend_logs_enabled: bool = False
+    docker_socket_path: str = "/var/run/docker.sock"
+    docker_api_version: str = "v1.41"
+    log_sources: str = "travel-api=deeptravel-api-1,admin-api=deeptravel-admin-admin-api-1"
+    log_tail_limit: int = 300
+    log_line_max_chars: int = 8_000
+    log_context_max_chars: int = 1_000
+    log_heartbeat_seconds: float = 12.0
+    log_client_poll_seconds: float = 1.0
+    log_stream_batch: int = 200
+    log_max_streams: int = 6
+
+
+def parse_log_sources(value: str) -> dict[str, str]:
+    sources: dict[str, str] = {}
+    for item in value.split(","):
+        if not item.strip():
+            continue
+        alias, separator, target = item.partition("=")
+        alias = alias.strip()
+        target = target.strip()
+        if not separator or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", alias) or not target:
+            raise ValueError(f"非法 LOG_SOURCES 项：{item}")
+        sources[alias] = target
+    return sources
 
 
 settings = Settings()
@@ -36,8 +82,42 @@ engine = create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=1
 SessionLocal = sessionmaker(engine, expire_on_commit=False)
 media_root = Path(settings.media_root).resolve()
 media_root.mkdir(parents=True, exist_ok=True)
+normalization_limits = NormalizationLimits(
+    message_chars=max(256, settings.log_line_max_chars),
+    context_string_chars=max(128, settings.log_context_max_chars),
+)
+configured_log_sources = parse_log_sources(settings.log_sources)
+docker_log_source = DockerLogSource(
+    socket_path=settings.docker_socket_path,
+    sources=configured_log_sources,
+    api_version=settings.docker_api_version,
+    limits=normalization_limits,
+)
+stream_limiter = StreamLimiter(settings.log_max_streams)
 
-app = FastAPI(title="简地内容中台 API", version="1.0.0")
+
+def run_log_retention() -> int:
+    with SessionLocal() as db:
+        removed = cleanup_client_logs(
+            db,
+            retention_days=max(1, settings.client_log_retention_days),
+            max_rows=max(100, settings.client_log_max_rows),
+            batch_size=max(1, settings.client_log_cleanup_batch),
+        )
+        db.commit()
+        return removed
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    if hmac.compare_digest(settings.admin_token, settings.client_log_ingest_token):
+        raise RuntimeError("CLIENT_LOG_INGEST_TOKEN 必须与 ADMIN_TOKEN 不同")
+    ensure_client_log_schema(engine)
+    await asyncio.to_thread(run_log_retention)
+    yield
+
+
+app = FastAPI(title="简地内容中台 API", version="1.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()],
@@ -61,8 +141,14 @@ def authorize(authorization: Annotated[str | None, Header()] = None) -> None:
         raise HTTPException(status_code=401, detail="管理令牌无效")
 
 
+def authorize_client_ingest(x_client_log_token: Annotated[str | None, Header()] = None) -> None:
+    if not x_client_log_token or not hmac.compare_digest(x_client_log_token, settings.client_log_ingest_token):
+        raise HTTPException(status_code=401, detail="客户端日志令牌无效")
+
+
 Db = Annotated[Session, Depends(get_db)]
 Auth = Annotated[None, Depends(authorize)]
+ClientLogAuth = Annotated[None, Depends(authorize_client_ingest)]
 
 
 def iso(value: datetime | None) -> str | None:
@@ -148,7 +234,218 @@ def commit_or_conflict(db: Session, message: str = "数据与现有内容冲突"
 @app.get("/api/admin/health")
 def health(_: Auth, db: Db):
     db.execute(select(func.count()).select_from(City)).scalar_one()
-    return {"status": "ok", "database": "connected", "media_root": str(media_root)}
+    return {
+        "status": "ok",
+        "database": "connected",
+        "media_root": str(media_root),
+        "client_log_storage": "connected",
+        "backend_logs": "available" if settings.backend_logs_enabled and docker_log_source.available else "unavailable",
+    }
+
+
+def _query_client_events(**kwargs: Any):
+    with SessionLocal() as db:
+        return query_client_events(db, **kwargs)
+
+
+def _parse_levels(value: str) -> set[str]:
+    return {normalize_level(item) for item in value.split(",") if item.strip()}
+
+
+@app.post("/api/runtime/client-logs", status_code=202)
+async def ingest_client_logs(request: Request, _: ClientLogAuth, db: Db):
+    content_length = request.headers.get("content-length")
+    max_bytes = max(1, settings.client_log_max_request_kb) * 1024
+    if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+        raise HTTPException(413, "客户端日志请求过大")
+    body = await request.body()
+    if len(body) > max_bytes:
+        raise HTTPException(413, "客户端日志请求过大")
+    try:
+        payload = ClientLogBatch.model_validate_json(body)
+    except ValidationError as exc:
+        raise HTTPException(422, exc.errors(include_input=False, include_url=False)) from exc
+    if len(payload.events) > min(50, max(1, settings.client_log_max_batch)):
+        raise HTTPException(422, "单批客户端日志数量超出限制")
+
+    received_at = datetime.now(UTC)
+    normalized = []
+    for index, item in enumerate(payload.events):
+        context = {
+            **item.context,
+            "_session_id": item.session_id,
+            "_app_version": item.app_version,
+            "_platform": item.platform,
+        }
+        normalized.append(
+            normalize_event(
+                cursor=f"pending:{index}",
+                occurred_at=item.occurred_at,
+                received_at=received_at,
+                source_type="client",
+                source=item.source,
+                level=item.level,
+                category=item.category,
+                message=item.message,
+                context=context,
+                limits=normalization_limits,
+            )
+        )
+    try:
+        rows = persist_client_events(db, normalized)
+        db.commit()
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to persist client runtime logs")
+        raise HTTPException(503, "客户端日志暂时无法写入") from None
+
+    try:
+        run_log_retention()
+    except Exception:
+        logger.exception("Client log retention cleanup failed")
+    return {
+        "accepted": len(rows),
+        "first_cursor": rows[0].id if rows else None,
+        "last_cursor": rows[-1].id if rows else None,
+    }
+
+
+@app.get("/api/admin/logs/sources")
+def list_log_sources(_: Auth):
+    backend_available = settings.backend_logs_enabled and docker_log_source.available
+    return {
+        "client": {"id": "client", "label": "客户端", "available": True},
+        "backend": [
+            {"id": alias, "label": alias.replace("-", " "), "available": backend_available}
+            for alias in configured_log_sources
+        ],
+        "limits": {
+            "tail": settings.log_tail_limit,
+            "max_streams": settings.log_max_streams,
+            "retention_days": settings.client_log_retention_days,
+        },
+    }
+
+
+@app.get("/api/admin/logs/client/history")
+def client_log_history(
+    _: Auth,
+    db: Db,
+    after: int | None = None,
+    before: int | None = None,
+    levels: str = "",
+    keyword: str = "",
+    session_id: str = "",
+    source: str = "",
+    limit: int = 200,
+):
+    events = query_client_events(
+        db,
+        after_cursor=after,
+        before_cursor=before,
+        levels=_parse_levels(levels),
+        keyword=keyword[:200],
+        session_id=session_id[:120],
+        source=source[:120],
+        limit=min(max(limit, 1), settings.log_tail_limit),
+    )
+    return {"events": [event.to_dict() for event in events]}
+
+
+async def client_log_stream(request: Request, *, after: int | None, tail: int):
+    yield sse_message(
+        "metadata",
+        {"source_type": "client", "source": "client", "heartbeat_seconds": settings.log_heartbeat_seconds},
+    )
+    cursor = after
+    initial = await asyncio.to_thread(
+        _query_client_events,
+        after_cursor=after,
+        limit=min(max(1, tail), settings.log_tail_limit),
+    )
+    for event in initial:
+        cursor = int(event.cursor)
+        yield sse_message("log", event.to_dict(), cursor=event.cursor)
+
+    last_heartbeat = time.monotonic()
+    while not await request.is_disconnected():
+        await asyncio.sleep(max(0.2, settings.log_client_poll_seconds))
+        events = await asyncio.to_thread(
+            _query_client_events,
+            after_cursor=cursor if cursor is not None else 0,
+            limit=max(1, settings.log_stream_batch),
+        )
+        for event in events:
+            cursor = int(event.cursor)
+            yield sse_message("log", event.to_dict(), cursor=event.cursor)
+            last_heartbeat = time.monotonic()
+        if time.monotonic() - last_heartbeat >= max(2.0, settings.log_heartbeat_seconds):
+            yield sse_message("heartbeat", {"at": datetime.now(UTC).isoformat()})
+            last_heartbeat = time.monotonic()
+
+
+@app.get("/api/admin/logs/client/stream")
+async def stream_client_logs(request: Request, _: Auth, after: int | None = None, tail: int = 200):
+    if not await stream_limiter.acquire():
+        raise HTTPException(429, "实时日志连接数已达上限")
+    source = client_log_stream(request, after=after, tail=tail)
+    return StreamingResponse(
+        limited_stream(source, stream_limiter),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
+
+
+async def backend_log_stream(request: Request, *, source: str, tail: int):
+    yield sse_message(
+        "metadata",
+        {"source_type": "backend", "source": source, "heartbeat_seconds": settings.log_heartbeat_seconds},
+    )
+    iterator = docker_log_source.follow(source, tail=tail).__aiter__()
+    pending: asyncio.Task | None = None
+    try:
+        while not await request.is_disconnected():
+            if pending is None:
+                pending = asyncio.create_task(anext(iterator))
+            done, _ = await asyncio.wait({pending}, timeout=max(2.0, settings.log_heartbeat_seconds))
+            if not done:
+                yield sse_message("heartbeat", {"at": datetime.now(UTC).isoformat()})
+                continue
+            try:
+                event = pending.result()
+            except StopAsyncIteration:
+                yield sse_message("source_status", {"status": "ended", "source": source})
+                break
+            pending = None
+            yield sse_message("log", event.to_dict(), cursor=event.cursor)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("Backend log source %s unavailable: %s", source, type(exc).__name__)
+        yield sse_message(
+            "source_status",
+            {"status": "unavailable", "source": source, "message": "后端日志源暂不可用"},
+        )
+    finally:
+        if pending and not pending.done():
+            pending.cancel()
+        await iterator.aclose()
+
+
+@app.get("/api/admin/logs/backend/stream")
+async def stream_backend_logs(request: Request, _: Auth, source: str, tail: int = 200):
+    if source not in configured_log_sources:
+        raise HTTPException(404, "日志来源不存在")
+    if not settings.backend_logs_enabled or not docker_log_source.available:
+        raise HTTPException(503, "后端日志读取尚未启用或 Docker socket 不可用")
+    if not await stream_limiter.acquire():
+        raise HTTPException(429, "实时日志连接数已达上限")
+    stream = backend_log_stream(request, source=source, tail=min(max(tail, 1), settings.log_tail_limit))
+    return StreamingResponse(
+        limited_stream(stream, stream_limiter),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/admin/dashboard")

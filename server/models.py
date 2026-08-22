@@ -95,3 +95,20 @@ class JourneyAnswer(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     stop_id: Mapped[str] = mapped_column(String(36), index=True)
+
+
+class ClientRuntimeLog(Base):
+    __tablename__ = "client_runtime_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    level: Mapped[str] = mapped_column(String(16), index=True)
+    category: Mapped[str] = mapped_column(String(120), index=True)
+    message: Mapped[str] = mapped_column(Text)
+    session_id: Mapped[str] = mapped_column(String(120), index=True)
+    app_version: Mapped[str] = mapped_column(String(80))
+    platform: Mapped[str] = mapped_column(String(40))
+    source: Mapped[str] = mapped_column(String(120), index=True)
+    context_json: Mapped[dict] = mapped_column(JSON)
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False)

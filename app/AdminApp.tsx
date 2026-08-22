@@ -1,8 +1,9 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import LogConsole from "./logs/LogConsole.tsx";
 
-type Tab = "dashboard" | "cities" | "routes" | "stops" | "challenges" | "media" | "import";
+type Tab = "dashboard" | "cities" | "routes" | "stops" | "challenges" | "media" | "import" | "logs";
 type Kind = "city" | "route" | "stop" | "challenge";
 type Data = Record<string, unknown>;
 type City = { id: string; slug: string; name: string; subtitle: string; hero_image: string; latitude: number; longitude: number };
@@ -14,11 +15,11 @@ type Dashboard = { cities: number; routes: number; published_routes: number; sto
 
 const navItems: Array<[Tab, string, string]> = [
   ["dashboard", "01", "总览"], ["cities", "02", "城市"], ["routes", "03", "路线"],
-  ["stops", "04", "站点与故事"], ["challenges", "05", "题目"], ["media", "06", "媒体库"], ["import", "07", "批量导入"],
+  ["stops", "04", "站点与故事"], ["challenges", "05", "题目"], ["media", "06", "媒体库"], ["import", "07", "批量导入"], ["logs", "08", "运行日志"],
 ];
 const titles: Record<Tab, [string, string]> = {
   dashboard: ["内容总览", "CONTENT OPERATIONS"], cities: ["城市管理", "DESTINATIONS"], routes: ["路线管理", "CURATED ROUTES"],
-  stops: ["站点与故事", "STORIES & PLACES"], challenges: ["问题管理", "CHALLENGES"], media: ["媒体资源", "MEDIA LIBRARY"], import: ["批量导入", "CONTENT IMPORT"],
+  stops: ["站点与故事", "STORIES & PLACES"], challenges: ["问题管理", "CHALLENGES"], media: ["媒体资源", "MEDIA LIBRARY"], import: ["批量导入", "CONTENT IMPORT"], logs: ["运行日志", "RUNTIME OBSERVABILITY"],
 };
 const emptyDashboard: Dashboard = { cities: 0, routes: 0, published_routes: 0, stops: 0, challenges: 0, media: 0, journeys: 0, missing_challenges: 0, recent_routes: [] };
 
@@ -39,8 +40,11 @@ export default function AdminApp() {
   const [media, setMedia] = useState<Media[]>([]);
 
   useEffect(() => {
-    setApiBase(localStorage.getItem("jiandi-admin-api") || `${window.location.protocol}//${window.location.hostname}:5100/api/admin`);
-    setToken(localStorage.getItem("jiandi-admin-token") || "");
+    const timer = window.setTimeout(() => {
+      setApiBase(localStorage.getItem("jiandi-admin-api") || `${window.location.protocol}//${window.location.hostname}:5100/api/admin`);
+      setToken(localStorage.getItem("jiandi-admin-token") || "");
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, []);
 
   const request = useCallback(async <T,>(path: string, init: RequestInit = {}, override?: { base: string; token: string }): Promise<T> => {
@@ -72,7 +76,7 @@ export default function AdminApp() {
     } finally { setLoading(false); }
   }, [request]);
 
-  useEffect(() => { if (apiBase && token) void loadAll(); }, [apiBase, token, loadAll]);
+  useEffect(() => { if (!apiBase || !token) return; const timer = window.setTimeout(() => void loadAll(), 0); return () => window.clearTimeout(timer); }, [apiBase, token, loadAll]);
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(""), 4200); return () => window.clearTimeout(timer); }, [notice]);
 
   async function saveConnection(event: FormEvent<HTMLFormElement>) {
@@ -102,7 +106,7 @@ export default function AdminApp() {
     <section className="workspace">
       <header className="topbar"><div><p className="eyebrow">{titles[active][1]}</p><h1>{titles[active][0]}</h1></div><div className="top-actions">
         <button className="ghost-button" onClick={() => setSettingsOpen(true)}>连接设置</button>
-        {active !== "import" && <button className="ghost-button" onClick={() => setActive("import")}>导入内容</button>}
+        {active !== "import" && active !== "logs" && <button className="ghost-button" onClick={() => setActive("import")}>导入内容</button>}
         {active === "cities" && <button className="primary-button" onClick={() => setEditor({ kind: "city" })}>＋ 新建城市</button>}
         {(active === "dashboard" || active === "routes") && <button className="primary-button" onClick={() => switchAndCreate("routes", "route")}>＋ 新建路线</button>}
         {active === "stops" && <button className="primary-button" onClick={() => setEditor({ kind: "stop" })}>＋ 新建故事</button>}
@@ -116,6 +120,7 @@ export default function AdminApp() {
         {active === "challenges" && <ChallengesView rows={challenges} onEdit={(item) => setEditor({ kind: "challenge", item })} onDelete={(item) => remove("challenge", item.id, item.prompt)} />}
         {active === "media" && <MediaView rows={media} request={request} onChanged={() => refresh("媒体库已更新")} onDelete={(item) => remove("media", item.key, item.key)} setNotice={setNotice} />}
         {active === "import" && <ImportView request={request} onImported={() => refresh("导入完成，内容已写入数据库")} setNotice={setNotice} />}
+        {active === "logs" && <LogConsole apiBase={apiBase} token={token} onNotice={setNotice} />}
       </>}
     </section>
     {(settingsOpen || (!connected && apiBase && !token)) && <ConnectionDialog apiBase={apiBase} token={token} loading={loading} onSubmit={saveConnection} onClose={connected ? () => setSettingsOpen(false) : undefined} />}
