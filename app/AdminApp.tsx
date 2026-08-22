@@ -8,6 +8,7 @@ type Tab =
   | "cities"
   | "routes"
   | "fragmented"
+  | "stories"
   | "stops"
   | "challenges"
   | "media"
@@ -174,23 +175,56 @@ type NarrationBatchResult = {
     media_path?: string;
   }>;
 };
+type HomeStoryTrackView = {
+  id: string;
+  profile_id: string;
+  profile_name: string;
+  status: string;
+  duration_ms: number;
+  is_current: boolean;
+  playback_path: string;
+};
+type HomeStoryView = {
+  arc_id: string;
+  arc_title: string;
+  route_title: string;
+  route_status: string;
+  city_name: string;
+  transcript: string;
+  transcript_hash: string;
+  script_version: string;
+  publication: {
+    id: string;
+    title: string;
+    introduction: string;
+    cover_image: string;
+    selection_weight: number;
+    status: string;
+    selected_track_id?: string | null;
+  } | null;
+  tracks: HomeStoryTrackView[];
+  blockers: string[];
+  ready_to_publish: boolean;
+};
 
 const navItems: Array<[Tab, string, string]> = [
   ["dashboard", "01", "总览"],
   ["cities", "02", "城市"],
   ["routes", "03", "路线"],
   ["fragmented", "04", "碎片导览"],
-  ["stops", "05", "站点与故事"],
-  ["challenges", "06", "题目"],
-  ["media", "07", "媒体库"],
-  ["import", "08", "批量导入"],
-  ["logs", "09", "运行日志"],
+  ["stories", "05", "首页听故事"],
+  ["stops", "06", "站点与故事"],
+  ["challenges", "07", "题目"],
+  ["media", "08", "媒体库"],
+  ["import", "09", "批量导入"],
+  ["logs", "10", "运行日志"],
 ];
 const titles: Record<Tab, [string, string]> = {
   dashboard: ["内容总览", "CONTENT OPERATIONS"],
   cities: ["城市管理", "DESTINATIONS"],
   routes: ["路线管理", "CURATED ROUTES"],
   fragmented: ["碎片导览配置", "FRAGMENTED AUDIO ROUTES"],
+  stories: ["首页听故事", "CURATED STORY LISTENING"],
   stops: ["站点与故事", "STORIES & PLACES"],
   challenges: ["问题管理", "CHALLENGES"],
   media: ["媒体资源", "MEDIA LIBRARY"],
@@ -524,6 +558,9 @@ export default function AdminApp() {
                 setNotice={setNotice}
                 onChanged={() => refresh()}
               />
+            )}
+            {active === "stories" && (
+              <HomeStoriesWorkspace request={request} setNotice={setNotice} />
             )}
             {active === "stops" && (
               <StopsView
@@ -1010,6 +1047,357 @@ function MediaView({
         </div>
       </ResourcePanel>
     </>
+  );
+}
+
+function HomeStoriesWorkspace({
+  request,
+  setNotice,
+}: {
+  request: <T>(p: string, i?: RequestInit) => Promise<T>;
+  setNotice: (x: string) => void;
+}) {
+  const [stories, setStories] = useState<HomeStoryView[]>([]);
+  const [profiles, setProfiles] = useState<NarrationProfileView[]>([]);
+  const [selectedArcId, setSelectedArcId] = useState("");
+  const [profileId, setProfileId] = useState("");
+  const [uploadDuration, setUploadDuration] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [draft, setDraft] = useState({
+    title: "",
+    introduction: "",
+    cover_image: "",
+    selection_weight: 1,
+    selected_track_id: "",
+  });
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const selected = stories.find((item) => item.arc_id === selectedArcId);
+
+  const load = useCallback(async () => {
+    try {
+      const [storyRows, profileRows] = await Promise.all([
+        request<HomeStoryView[]>("/home-stories"),
+        request<NarrationProfileView[]>("/narration/profiles"),
+      ]);
+      setStories(storyRows);
+      setProfiles(profileRows.filter((item) => item.status !== "archived"));
+      setSelectedArcId((current) =>
+        storyRows.some((item) => item.arc_id === current)
+          ? current
+          : storyRows[0]?.arc_id || "",
+      );
+      setProfileId((current) =>
+        profileRows.some((item) => item.id === current)
+          ? current
+          : profileRows.find((item) => item.is_default)?.id ||
+            profileRows[0]?.id ||
+            "",
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "完整故事读取失败");
+    }
+  }, [request, setNotice]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+  useEffect(() => {
+    const publication = selected?.publication;
+    setDraft({
+      title: publication?.title || selected?.arc_title || "",
+      introduction: publication?.introduction || "",
+      cover_image: publication?.cover_image || "",
+      selection_weight: publication?.selection_weight || 1,
+      selected_track_id: publication?.selected_track_id || "",
+    });
+  }, [selected]);
+  useEffect(
+    () => () => {
+      audioRef.current?.pause();
+    },
+    [],
+  );
+
+  async function mutate(path: string, init: RequestInit, success: string) {
+    setBusy(true);
+    try {
+      const value = await request<HomeStoryView>(path, init);
+      setStories((current) =>
+        current.map((item) => (item.arc_id === value.arc_id ? value : item)),
+      );
+      setNotice(success);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "操作失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function save() {
+    if (!selected) return;
+    await mutate(
+      `/home-stories/${selected.arc_id}`,
+      { method: "PUT", body: JSON.stringify(draft) },
+      "首页故事卡片已保存",
+    );
+  }
+
+  async function generate() {
+    if (!selected || !profileId) return;
+    await mutate(
+      `/home-stories/${selected.arc_id}/generate`,
+      { method: "POST", body: JSON.stringify({ profile_id: profileId }) },
+      "完整故事音频已生成，请试听后审核",
+    );
+  }
+
+  async function upload(file: File | undefined) {
+    if (!selected || !profileId || !file) return;
+    const seconds = Number(uploadDuration);
+    if (!Number.isFinite(seconds) || seconds <= 0) {
+      setNotice("上传前请填写音频总时长（秒）");
+      return;
+    }
+    const body = new FormData();
+    body.set("profile_id", profileId);
+    body.set("duration_ms", String(Math.round(seconds * 1000)));
+    body.set("file", file);
+    await mutate(
+      `/home-stories/${selected.arc_id}/upload`,
+      { method: "POST", body },
+      "完整故事音频已上传，请试听后审核",
+    );
+  }
+
+  async function transition(action: string, message: string) {
+    if (!selected) return;
+    if (
+      ["publish", "withdraw", "archive"].includes(action) &&
+      !window.confirm(`${message}？`)
+    )
+      return;
+    await mutate(
+      `/home-stories/${selected.arc_id}/${action}`,
+      { method: "POST" },
+      message,
+    );
+  }
+
+  async function playTrack(track: HomeStoryTrackView) {
+    try {
+      audioRef.current?.pause();
+      const payload = await request<ArrayBuffer>(track.playback_path);
+      const url = URL.createObjectURL(new Blob([payload], { type: "audio/mpeg" }));
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.addEventListener("ended", () => URL.revokeObjectURL(url), {
+        once: true,
+      });
+      await audio.play();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "音频试听失败");
+    }
+  }
+
+  const status = selected?.publication?.status || "draft";
+  const primaryAction =
+    status === "draft" || status === "withdrawn"
+      ? ["submit-review", "提交审核"]
+      : status === "in_review"
+        ? ["approve", "审核通过"]
+        : status === "approved"
+          ? ["publish", "发布到首页"]
+          : status === "published"
+            ? ["withdraw", "从首页撤回"]
+            : null;
+
+  return (
+    <section className="home-story-workspace">
+      <div className="home-story-list panel">
+        <div className="panel-heading">
+          <div>
+            <p className="eyebrow">STORY POOL</p>
+            <h2>可听故事池</h2>
+          </div>
+          <span className="status-chip published">{stories.length} 篇</span>
+        </div>
+        <div className="home-story-list-items">
+          {stories.map((item) => (
+            <button
+              key={item.arc_id}
+              className={item.arc_id === selectedArcId ? "active" : ""}
+              onClick={() => setSelectedArcId(item.arc_id)}
+            >
+              <i>{item.city_name.slice(0, 1)}</i>
+              <span>
+                <strong>{item.publication?.title || item.arc_title}</strong>
+                <small>{item.city_name} · {item.route_title}</small>
+              </span>
+              <em>{storyStatusLabel(item.publication?.status || "draft")}</em>
+            </button>
+          ))}
+          {!stories.length && <TableEmpty text="还没有可配置的完整故事" />}
+        </div>
+      </div>
+
+      {selected && (
+        <article className="home-story-editor panel">
+          <div className="home-story-hero">
+            <div>
+              <p className="eyebrow">{selected.city_name} · {selected.route_title}</p>
+              <h2>{draft.title || selected.arc_title}</h2>
+              <p>从路线的完整故事正文生成音频；首页只会随机抽取已经审核发布、且文字哈希一致的内容。</p>
+            </div>
+            <span className={`status-chip ${status}`}>{storyStatusLabel(status)}</span>
+          </div>
+
+          <div className="home-story-form">
+            <label className="field">
+              首页标题
+              <input
+                value={draft.title}
+                maxLength={255}
+                onChange={(event) => setDraft({ ...draft, title: event.target.value })}
+              />
+            </label>
+            <label className="field">
+              一句话引子
+              <textarea
+                rows={3}
+                value={draft.introduction}
+                onChange={(event) =>
+                  setDraft({ ...draft, introduction: event.target.value })
+                }
+                placeholder="让人愿意戴上耳机、停留几分钟。"
+              />
+            </label>
+            <div className="form-grid">
+              <label className="field">
+                封面资源路径
+                <input
+                  value={draft.cover_image}
+                  onChange={(event) =>
+                    setDraft({ ...draft, cover_image: event.target.value })
+                  }
+                  placeholder="public/content/... 或已登记媒体 URL"
+                />
+              </label>
+              <label className="field">
+                随机权重（0–100）
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={draft.selection_weight}
+                  onChange={(event) =>
+                    setDraft({
+                      ...draft,
+                      selection_weight: Number(event.target.value),
+                    })
+                  }
+                />
+              </label>
+            </div>
+            <button className="ghost-button" disabled={busy || status === "published"} onClick={() => void save()}>
+              保存卡片内容
+            </button>
+          </div>
+
+          <section className="home-story-transcript">
+            <div>
+              <p className="eyebrow">CANONICAL TRANSCRIPT</p>
+              <h3>完整故事正文</h3>
+              <code>{selected.script_version} · {selected.transcript_hash.slice(0, 12)}</code>
+            </div>
+            <p>{selected.transcript}</p>
+          </section>
+
+          <section className="home-story-audio">
+            <div className="panel-heading">
+              <div>
+                <p className="eyebrow">VOICE REVIEW</p>
+                <h3>生成与试听</h3>
+              </div>
+              <div className="home-story-generate">
+                <select value={profileId} onChange={(event) => setProfileId(event.target.value)}>
+                  {profiles.map((profile) => (
+                    <option key={profile.id} value={profile.id}>{profile.display_name}</option>
+                  ))}
+                </select>
+                <button className="primary-button" disabled={busy || !profileId || status === "published"} onClick={() => void generate()}>
+                  生成当前正文
+                </button>
+                <input
+                  aria-label="上传音频时长（秒）"
+                  type="number"
+                  min="1"
+                  step="0.1"
+                  placeholder="时长（秒）"
+                  value={uploadDuration}
+                  onChange={(event) => setUploadDuration(event.target.value)}
+                />
+                <label className={`ghost-button ${busy || !profileId || status === "published" ? "disabled" : ""}`}>
+                  上传成品音频
+                  <input
+                    hidden
+                    type="file"
+                    accept="audio/mpeg,audio/mp4,audio/x-m4a,audio/wav,audio/x-wav"
+                    disabled={busy || !profileId || status === "published"}
+                    onChange={(event) => {
+                      void upload(event.target.files?.[0]);
+                      event.target.value = "";
+                    }}
+                  />
+                </label>
+              </div>
+            </div>
+            <div className="home-story-track-grid">
+              {selected.tracks.map((track) => (
+                <article key={track.id} className={track.is_current ? "current" : "stale"}>
+                  <span>{track.is_current ? "正文一致" : "已过期"}</span>
+                  <strong>{track.profile_name}</strong>
+                  <small>{storyStatusLabel(track.status)} · {formatStoryDuration(track.duration_ms)}</small>
+                  <button className="ghost-button" onClick={() => void playTrack(track)}>试听</button>
+                  <label>
+                    <input
+                      type="radio"
+                      name="home-story-track"
+                      checked={draft.selected_track_id === track.id}
+                      disabled={!track.is_current || status === "published"}
+                      onChange={() => setDraft({ ...draft, selected_track_id: track.id })}
+                    />
+                    设为发布音频
+                  </label>
+                </article>
+              ))}
+              {!selected.tracks.length && <p className="home-story-empty">还没有音频。选择音色后生成一个试听版本。</p>}
+            </div>
+          </section>
+
+          <section className={selected.blockers.length ? "story-blockers" : "story-blockers ready"}>
+            <strong>{selected.blockers.length ? "发布前还差这些" : "发布校验已通过"}</strong>
+            {selected.blockers.length > 0 && (
+              <ul>{selected.blockers.map((item) => <li key={item}>{item}</li>)}</ul>
+            )}
+          </section>
+          <div className="publish-bar">
+            <span>只有正文、音频、路线和卡片信息同时有效，客户端才会抽到这个故事。</span>
+            {status !== "published" && status !== "archived" && (
+              <button className="danger-link" disabled={busy} onClick={() => void transition("archive", "故事已归档")}>归档</button>
+            )}
+            {primaryAction && (
+              <button
+                className="primary-button"
+                disabled={busy || (primaryAction[0] === "publish" && !selected.ready_to_publish)}
+                onClick={() => void transition(primaryAction[0], primaryAction[1])}
+              >
+                {primaryAction[1]}
+              </button>
+            )}
+          </div>
+        </article>
+      )}
+    </section>
   );
 }
 
@@ -3144,4 +3532,22 @@ function narrationErrorMessage(code?: string | null) {
     empty_transcript: "旁白文字稿为空",
   };
   return messages[code || ""] || code || "未知错误";
+}
+
+function storyStatusLabel(status: string) {
+  return (
+    {
+      draft: "草稿",
+      in_review: "审核中",
+      approved: "已审核",
+      published: "已发布",
+      withdrawn: "已撤回",
+      archived: "已归档",
+    }[status] || status
+  );
+}
+
+function formatStoryDuration(durationMs: number) {
+  const seconds = Math.max(0, Math.round(durationMs / 1000));
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }

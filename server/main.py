@@ -31,6 +31,7 @@ from models import (
     FragmentClaim,
     FragmentDependency,
     FragmentNarrationTrack,
+    HomeStoryPublication,
     HistoricalClaim,
     HistoricalSource,
     Journey,
@@ -43,6 +44,7 @@ from models import (
     Stop,
     StoryArc,
     StoryFragment,
+    StoryNarrationTrack,
     TriggerRegion,
 )
 from object_storage import AlibabaOssObjectStorage, LocalObjectStorage, StoredObject
@@ -867,6 +869,8 @@ def delete_media(asset_key: str, _: Auth, db: Db):
         + (db.scalar(select(func.count()).select_from(Route).where(Route.hero_image == item.storage_path)) or 0)
         + (db.scalar(select(func.count()).select_from(Stop).where(or_(Stop.image == item.storage_path, Stop.audio_url == item.storage_path))) or 0)
         + (db.scalar(select(func.count()).select_from(StoryFragment).where(StoryFragment.audio_path == item.storage_path)) or 0)
+        + (db.scalar(select(func.count()).select_from(HomeStoryPublication).where(HomeStoryPublication.cover_image == item.storage_path)) or 0)
+        + (db.scalar(select(func.count()).select_from(StoryNarrationTrack).where(StoryNarrationTrack.media_path == item.storage_path)) or 0)
     )
     if references:
         raise HTTPException(409, f"该资源正在被 {references} 处内容使用，不能删除")
@@ -935,6 +939,7 @@ def narration_default_variants() -> list[dict[str, Any]]:
 
 
 DEFAULT_NARRATION_PROFILE_ID = "default-narration-voice"
+SHENZHEN_WARM_PROFILE_ID = "shenzhen-warm-female-voice"
 
 
 def narration_profile_dict(item: NarrationVoiceProfile) -> dict[str, Any]:
@@ -1009,6 +1014,33 @@ def ensure_default_narration_profile(db: Session) -> NarrationVoiceProfile:
                     published_at=now,
                 )
             )
+    db.flush()
+    return profile
+
+
+def ensure_shenzhen_warm_profile(db: Session) -> NarrationVoiceProfile:
+    profile = db.get(NarrationVoiceProfile, SHENZHEN_WARM_PROFILE_ID)
+    if profile is not None:
+        return profile
+    now = datetime.now(UTC)
+    profile = NarrationVoiceProfile(
+        id=SHENZHEN_WARM_PROFILE_ID,
+        slug="shenzhen-warm-companion",
+        display_name="温柔同行者",
+        description="亲切、轻盈，像熟悉深圳的朋友陪你边走边聊",
+        provider=narration_synthesizer.provider,
+        model=narration_synthesizer.model,
+        voice_id="Chinese (Mandarin)_Warm_HeartedGirl",
+        emotion="calm",
+        speed=0.94,
+        pitch=0,
+        display_order=10,
+        status="draft",
+        is_default=False,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(profile)
     db.flush()
     return profile
 
@@ -1187,9 +1219,523 @@ def persist_formal_narration_track(
         raise
 
 
+def story_transcript_hash(arc: StoryArc) -> str:
+    return hashlib.sha256(arc.complete_story.strip().encode()).hexdigest()
+
+
+def home_story_dict(db: Session, arc: StoryArc) -> dict[str, Any]:
+    route = db.get(Route, arc.route_id)
+    city = db.get(City, route.city_id) if route else None
+    publication = db.scalar(
+        select(HomeStoryPublication).where(HomeStoryPublication.arc_id == arc.id)
+    )
+    tracks = list(
+        db.scalars(
+            select(StoryNarrationTrack)
+            .where(StoryNarrationTrack.arc_id == arc.id)
+            .order_by(StoryNarrationTrack.updated_at.desc())
+        )
+    )
+    expected_hash = story_transcript_hash(arc)
+    track_payloads: list[dict[str, Any]] = []
+    for track in tracks:
+        profile = db.get(NarrationVoiceProfile, track.profile_id)
+        track_payloads.append(
+            {
+                "id": track.id,
+                "profile_id": track.profile_id,
+                "profile_name": profile.display_name if profile else "未知音色",
+                "transcript_hash": track.transcript_hash,
+                "script_version": track.script_version,
+                "status": track.status,
+                "duration_ms": track.duration_ms,
+                "size_bytes": track.size_bytes,
+                "is_current": (
+                    track.transcript_hash == expected_hash
+                    and track.script_version == arc.script_version
+                ),
+                "playback_path": f"/home-stories/tracks/{track.id}/audio",
+                "reviewed_at": iso(track.reviewed_at),
+                "published_at": iso(track.published_at),
+                "updated_at": iso(track.updated_at),
+            }
+        )
+    selected = next(
+        (
+            item
+            for item in track_payloads
+            if publication and item["id"] == publication.selected_track_id
+        ),
+        None,
+    )
+    blockers: list[str] = []
+    if not arc.complete_story.strip():
+        blockers.append("完整故事正文为空")
+    if not publication:
+        blockers.append("尚未创建首页故事卡片")
+    else:
+        if not publication.title.strip():
+            blockers.append("标题为空")
+        if not publication.introduction.strip():
+            blockers.append("简介为空")
+        if not publication.cover_image.strip():
+            blockers.append("封面为空")
+        if publication.selection_weight <= 0:
+            blockers.append("随机权重必须大于 0")
+        if selected is None:
+            blockers.append("尚未选择完整故事音频")
+        elif not selected["is_current"]:
+            blockers.append("已选音频与当前正文不一致，请重新生成")
+        elif selected["status"] not in {"approved", "published"}:
+            blockers.append("已选音频尚未审核通过")
+    if route is None or route.content_status != "published":
+        blockers.append("所属路线尚未发布")
+    return {
+        "arc_id": arc.id,
+        "arc_title": arc.title,
+        "route_id": route.id if route else None,
+        "route_title": route.title if route else "路线已删除",
+        "route_status": route.content_status if route else "missing",
+        "city_id": city.id if city else None,
+        "city_name": city.name if city else "未知城市",
+        "transcript": arc.complete_story,
+        "transcript_hash": expected_hash,
+        "script_version": arc.script_version,
+        "pronunciation_notes": arc.pronunciation_notes_json,
+        "publication": (
+            {
+                "id": publication.id,
+                "title": publication.title,
+                "introduction": publication.introduction,
+                "cover_image": publication.cover_image,
+                "selection_weight": publication.selection_weight,
+                "status": publication.status,
+                "selected_track_id": publication.selected_track_id,
+                "reviewed_at": iso(publication.reviewed_at),
+                "published_at": iso(publication.published_at),
+                "updated_at": iso(publication.updated_at),
+            }
+            if publication
+            else None
+        ),
+        "tracks": track_payloads,
+        "blockers": blockers,
+        "ready_to_publish": not blockers,
+    }
+
+
+def require_story_arc(db: Session, arc_id: str) -> StoryArc:
+    arc = db.get(StoryArc, arc_id)
+    if arc is None:
+        raise HTTPException(404, "完整故事不存在")
+    return arc
+
+
+@app.get("/api/admin/home-stories")
+def list_home_stories(_: Auth, db: Db):
+    arcs = list(db.scalars(select(StoryArc).order_by(StoryArc.title)))
+    return [home_story_dict(db, arc) for arc in arcs]
+
+
+@app.put("/api/admin/home-stories/{arc_id}")
+def save_home_story(arc_id: str, payload: dict[str, Any], _: Auth, db: Db):
+    arc = require_story_arc(db, arc_id)
+    item = db.scalar(
+        select(HomeStoryPublication).where(HomeStoryPublication.arc_id == arc.id)
+    )
+    now = datetime.now(UTC)
+    if item is None:
+        item = HomeStoryPublication(
+            id=str(uuid4()),
+            arc_id=arc.id,
+            title=arc.title,
+            introduction="",
+            cover_image="",
+            selection_weight=1,
+            status="draft",
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(item)
+    if item.status == "published":
+        raise HTTPException(409, "已发布故事请先撤回，再修改")
+    title = str(payload.get("title", item.title)).strip()
+    introduction = str(payload.get("introduction", item.introduction)).strip()
+    cover_image = str(payload.get("cover_image", item.cover_image)).strip()
+    try:
+        selection_weight = int(payload.get("selection_weight", item.selection_weight))
+    except (TypeError, ValueError) as error:
+        raise HTTPException(422, "随机权重必须是整数") from error
+    if len(title) > 255 or len(introduction) > 2000 or len(cover_image) > 500:
+        raise HTTPException(422, "标题、简介或封面地址过长")
+    if selection_weight < 0 or selection_weight > 100:
+        raise HTTPException(422, "随机权重须在 0 到 100 之间")
+    selected_track_id = payload.get("selected_track_id", item.selected_track_id)
+    if selected_track_id:
+        selected_track = db.get(StoryNarrationTrack, str(selected_track_id))
+        if selected_track is None or selected_track.arc_id != arc.id:
+            raise HTTPException(422, "所选音频不属于当前完整故事")
+        item.selected_track_id = selected_track.id
+    else:
+        item.selected_track_id = None
+    item.title = title
+    item.introduction = introduction
+    item.cover_image = cover_image
+    item.selection_weight = selection_weight
+    item.updated_at = now
+    db.commit()
+    return home_story_dict(db, arc)
+
+
+@app.post("/api/admin/home-stories/{arc_id}/generate", status_code=201)
+def generate_home_story_track(arc_id: str, payload: dict[str, Any], _: Auth, db: Db):
+    arc = require_story_arc(db, arc_id)
+    transcript = arc.complete_story.strip()
+    if not transcript:
+        raise HTTPException(422, "完整故事正文为空")
+    ensure_default_narration_profile(db)
+    profile_id = str(payload.get("profile_id") or DEFAULT_NARRATION_PROFILE_ID)
+    profile = db.get(NarrationVoiceProfile, profile_id)
+    if profile is None or profile.status == "archived":
+        raise HTTPException(404, "音色档案不存在")
+    if settings.narration_provider == "minimax" and not settings.minimax_api_key.strip():
+        raise HTTPException(503, "尚未配置 MiniMax 语音凭证")
+    try:
+        result = narration_synthesizer.synthesize(
+            NarrationRequest(
+                transcript,
+                profile.voice_id,
+                profile.emotion,
+                profile.speed,
+                profile.pitch,
+                tuple(arc.pronunciation_notes_json or []),
+            )
+        )
+    except NarrationSynthesisError as error:
+        raise HTTPException(503, {"code": error.code, "message": str(error)}) from error
+    transcript_hash = story_transcript_hash(arc)
+    audio_hash = hashlib.sha256(result.payload).hexdigest()
+    profile_slug = re.sub(r"[^a-z0-9-]", "-", profile.slug.lower()) or "voice"
+    version = re.sub(r"[^a-zA-Z0-9._-]", "-", arc.script_version) or "v1"
+    object_key = (
+        f"public/home-stories/{arc.id}/{profile_slug}/"
+        f"{transcript_hash[:16]}-{version}-{audio_hash[:12]}.mp3"
+    )
+    uploaded = False
+    if not public_object_storage.exists(object_key):
+        public_object_storage.put(object_key, result.payload, result.mime_type)
+        uploaded = True
+    now = datetime.now(UTC)
+    try:
+        asset = db.scalar(select(MediaAsset).where(MediaAsset.object_key == object_key))
+        if asset is None:
+            asset = MediaAsset(
+                key=f"home-story-{arc.id[:20]}-{audio_hash[:12]}",
+                storage_path=object_key,
+                mime_type=result.mime_type,
+                storage_provider=public_object_storage.provider,
+                object_key=object_key,
+                canonical_url=(
+                    public_object_storage.public_url(object_key)
+                    if public_object_storage.provider == "oss"
+                    else None
+                ),
+                visibility="public",
+                size_bytes=len(result.payload),
+                checksum_sha256=audio_hash,
+                metadata_json={"kind": "home_story", "arc_id": arc.id},
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(asset)
+        track = db.scalar(
+            select(StoryNarrationTrack).where(
+                StoryNarrationTrack.arc_id == arc.id,
+                StoryNarrationTrack.profile_id == profile.id,
+                StoryNarrationTrack.transcript_hash == transcript_hash,
+                StoryNarrationTrack.script_version == arc.script_version,
+            )
+        )
+        if track is None:
+            track = StoryNarrationTrack(
+                id=str(uuid4()),
+                arc_id=arc.id,
+                profile_id=profile.id,
+                transcript_hash=transcript_hash,
+                script_version=arc.script_version,
+                media_path=object_key,
+                mime_type=result.mime_type,
+                size_bytes=len(result.payload),
+                duration_ms=max(1000, len(transcript) * 230),
+                checksum_sha256=audio_hash,
+                generation_metadata_json={},
+                status="in_review",
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(track)
+        track.media_path = object_key
+        track.mime_type = result.mime_type
+        track.size_bytes = len(result.payload)
+        track.duration_ms = max(1000, len(transcript) * 230)
+        track.checksum_sha256 = audio_hash
+        track.generation_metadata_json = {
+            "provider": result.provider,
+            "model": result.model,
+            "voice_id": profile.voice_id,
+            "emotion": profile.emotion,
+            "speed": profile.speed,
+            "pitch": profile.pitch,
+            "request_id": result.request_id,
+        }
+        track.status = "in_review"
+        track.reviewed_by = None
+        track.reviewed_at = None
+        track.published_at = None
+        track.updated_at = now
+        publication = db.scalar(
+            select(HomeStoryPublication).where(HomeStoryPublication.arc_id == arc.id)
+        )
+        if publication is None:
+            publication = HomeStoryPublication(
+                id=str(uuid4()),
+                arc_id=arc.id,
+                title=arc.title,
+                introduction="",
+                cover_image="",
+                selection_weight=1,
+                status="draft",
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(publication)
+        publication.selected_track_id = track.id
+        publication.updated_at = now
+        db.commit()
+    except Exception:
+        db.rollback()
+        if uploaded:
+            public_object_storage.delete(object_key)
+        raise
+    return home_story_dict(db, arc)
+
+
+@app.post("/api/admin/home-stories/{arc_id}/upload", status_code=201)
+def upload_home_story_track(
+    arc_id: str,
+    _: Auth,
+    db: Db,
+    profile_id: Annotated[str, Form()],
+    duration_ms: Annotated[int, Form()],
+    file: Annotated[UploadFile, File()],
+):
+    arc = require_story_arc(db, arc_id)
+    profile = db.get(NarrationVoiceProfile, profile_id)
+    if profile is None or profile.status == "archived":
+        raise HTTPException(404, "音色档案不存在")
+    mime_type = (file.content_type or "").lower()
+    extensions = {
+        "audio/mpeg": "mp3",
+        "audio/mp4": "m4a",
+        "audio/x-m4a": "m4a",
+        "audio/wav": "wav",
+        "audio/x-wav": "wav",
+    }
+    if mime_type not in extensions:
+        raise HTTPException(422, "仅支持 MP3、M4A 或 WAV 完整故事音频")
+    if duration_ms <= 0 or duration_ms > 24 * 60 * 60 * 1000:
+        raise HTTPException(422, "请填写有效的音频时长（毫秒）")
+    payload = file.file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+    if not payload:
+        raise HTTPException(422, "音频文件为空")
+    if len(payload) > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(413, f"音频不能超过 {settings.max_upload_mb} MB")
+    transcript_hash = story_transcript_hash(arc)
+    checksum = hashlib.sha256(payload).hexdigest()
+    version = re.sub(r"[^a-zA-Z0-9._-]", "-", arc.script_version) or "v1"
+    object_key = (
+        f"public/home-stories/{arc.id}/manual/"
+        f"{transcript_hash[:16]}-{version}-{checksum[:12]}.{extensions[mime_type]}"
+    )
+    uploaded = False
+    if not public_object_storage.exists(object_key):
+        public_object_storage.put(object_key, payload, mime_type)
+        uploaded = True
+    now = datetime.now(UTC)
+    try:
+        asset = db.scalar(select(MediaAsset).where(MediaAsset.object_key == object_key))
+        if asset is None:
+            db.add(
+                MediaAsset(
+                    key=f"home-story-manual-{arc.id[:16]}-{checksum[:12]}",
+                    storage_path=object_key,
+                    mime_type=mime_type,
+                    storage_provider=public_object_storage.provider,
+                    object_key=object_key,
+                    canonical_url=(
+                        public_object_storage.public_url(object_key)
+                        if public_object_storage.provider == "oss"
+                        else None
+                    ),
+                    visibility="public",
+                    size_bytes=len(payload),
+                    checksum_sha256=checksum,
+                    metadata_json={"kind": "home_story", "arc_id": arc.id, "source": "manual"},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        track = db.scalar(
+            select(StoryNarrationTrack).where(
+                StoryNarrationTrack.arc_id == arc.id,
+                StoryNarrationTrack.profile_id == profile.id,
+                StoryNarrationTrack.transcript_hash == transcript_hash,
+                StoryNarrationTrack.script_version == arc.script_version,
+            )
+        )
+        if track is None:
+            track = StoryNarrationTrack(
+                id=str(uuid4()),
+                arc_id=arc.id,
+                profile_id=profile.id,
+                transcript_hash=transcript_hash,
+                script_version=arc.script_version,
+                media_path=object_key,
+                mime_type=mime_type,
+                size_bytes=len(payload),
+                duration_ms=duration_ms,
+                status="in_review",
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(track)
+        track.media_path = object_key
+        track.mime_type = mime_type
+        track.size_bytes = len(payload)
+        track.duration_ms = duration_ms
+        track.checksum_sha256 = checksum
+        track.generation_metadata_json = {"source": "manual_upload", "filename": file.filename}
+        track.status = "in_review"
+        track.reviewed_by = None
+        track.reviewed_at = None
+        track.published_at = None
+        track.updated_at = now
+        publication = db.scalar(
+            select(HomeStoryPublication).where(HomeStoryPublication.arc_id == arc.id)
+        )
+        if publication is None:
+            publication = HomeStoryPublication(
+                id=str(uuid4()),
+                arc_id=arc.id,
+                title=arc.title,
+                introduction="",
+                cover_image="",
+                selection_weight=1,
+                status="draft",
+                created_at=now,
+                updated_at=now,
+            )
+            db.add(publication)
+        publication.selected_track_id = track.id
+        publication.updated_at = now
+        db.commit()
+    except Exception:
+        db.rollback()
+        if uploaded:
+            public_object_storage.delete(object_key)
+        raise
+    return home_story_dict(db, arc)
+
+
+@app.get("/api/admin/home-stories/tracks/{track_id}/audio")
+def stream_home_story_track(track_id: str, _: Auth, db: Db):
+    track = db.get(StoryNarrationTrack, track_id)
+    if track is None:
+        raise HTTPException(404, "完整故事音频不存在")
+    try:
+        stream = public_object_storage.open(track.media_path)
+    except FileNotFoundError as error:
+        raise HTTPException(404, "音频文件不存在") from error
+    def chunks():
+        with stream:
+            while payload := stream.read(64 * 1024):
+                yield payload
+
+    return StreamingResponse(chunks(), media_type=track.mime_type)
+
+
+@app.post("/api/admin/home-stories/{arc_id}/{action}")
+def transition_home_story(arc_id: str, action: str, _: Auth, db: Db):
+    arc = require_story_arc(db, arc_id)
+    item = db.scalar(
+        select(HomeStoryPublication).where(HomeStoryPublication.arc_id == arc.id)
+    )
+    if item is None:
+        raise HTTPException(409, "请先保存首页故事卡片")
+    track = db.get(StoryNarrationTrack, item.selected_track_id) if item.selected_track_id else None
+    now = datetime.now(UTC)
+    if action == "submit-review":
+        if item.status not in {"draft", "withdrawn"}:
+            raise HTTPException(409, "当前状态不能提交审核")
+        if not item.title.strip() or not item.introduction.strip() or not item.cover_image.strip():
+            raise HTTPException(422, "请先补齐标题、简介和封面")
+        item.status = "in_review"
+    elif action == "approve":
+        if item.status != "in_review":
+            raise HTTPException(409, "请先提交审核")
+        if track is None or track.arc_id != arc.id:
+            raise HTTPException(422, "请先选择完整故事音频")
+        if track.transcript_hash != story_transcript_hash(arc) or track.script_version != arc.script_version:
+            raise HTTPException(409, "音频已过期，请按当前正文重新生成")
+        item.status = "approved"
+        item.reviewed_by = "admin"
+        item.reviewed_at = now
+        track.status = "approved"
+        track.reviewed_by = "admin"
+        track.reviewed_at = now
+        track.updated_at = now
+    elif action == "publish":
+        if item.status != "approved":
+            raise HTTPException(409, "故事尚未审核通过")
+        route = db.get(Route, arc.route_id)
+        if route is None or route.content_status != "published":
+            raise HTTPException(409, "所属路线尚未发布")
+        if track is None or track.status != "approved":
+            raise HTTPException(409, "完整故事音频尚未审核通过")
+        if track.transcript_hash != story_transcript_hash(arc) or track.script_version != arc.script_version:
+            raise HTTPException(409, "音频已过期，请按当前正文重新生成")
+        if item.selection_weight <= 0:
+            raise HTTPException(422, "随机权重必须大于 0")
+        item.status = "published"
+        item.published_at = now
+        track.status = "published"
+        track.published_at = now
+        track.updated_at = now
+    elif action == "withdraw":
+        if item.status != "published":
+            raise HTTPException(409, "只有已发布故事可以撤回")
+        item.status = "withdrawn"
+        item.published_at = None
+        if track and track.status == "published":
+            track.status = "approved"
+            track.published_at = None
+            track.updated_at = now
+    elif action == "archive":
+        if item.status == "published":
+            raise HTTPException(409, "请先撤回已发布故事")
+        item.status = "archived"
+        item.published_at = None
+    else:
+        raise HTTPException(404, "未知故事流转操作")
+    item.updated_at = now
+    db.commit()
+    return home_story_dict(db, arc)
+
+
 @app.get("/api/admin/narration/profiles")
 def list_narration_profiles(_: Auth, db: Db):
     ensure_default_narration_profile(db)
+    ensure_shenzhen_warm_profile(db)
     db.commit()
     rows = list(
         db.scalars(
@@ -1800,6 +2346,7 @@ def _route_content(db: Session, route: Route) -> dict[str, Any]:
             "package_version": route.managed_package_version,
             "route": route_dict(route),
             "story_arc": None,
+            "home_story": None,
             "fragments": [],
             "sources": [],
             "claims": [],
@@ -1850,6 +2397,14 @@ def _route_content(db: Session, route: Route) -> dict[str, Any]:
     source_ids = sorted({row.source_id for row in support_rows})
     sources = list(
         db.scalars(select(HistoricalSource).where(HistoricalSource.id.in_(source_ids)))
+    )
+    home_publication = db.scalar(
+        select(HomeStoryPublication).where(HomeStoryPublication.arc_id == arc.id)
+    )
+    story_tracks = list(
+        db.scalars(
+            select(StoryNarrationTrack).where(StoryNarrationTrack.arc_id == arc.id)
+        )
     )
 
     def stop_payload(stop: Stop | None) -> dict[str, Any] | None:
@@ -1953,6 +2508,41 @@ def _route_content(db: Session, route: Route) -> dict[str, Any]:
             "source_version": arc.source_version,
             "publication_decision": arc.publication_decision,
         },
+        "home_story": (
+            {
+                "id": home_publication.id,
+                "title": home_publication.title,
+                "introduction": home_publication.introduction,
+                "cover_image": home_publication.cover_image,
+                "selection_weight": home_publication.selection_weight,
+                "status": home_publication.status,
+                "selected_track_id": home_publication.selected_track_id,
+                "reviewed_by": home_publication.reviewed_by,
+                "reviewed_at": iso(home_publication.reviewed_at),
+                "published_at": iso(home_publication.published_at),
+                "tracks": [
+                    {
+                        "id": track.id,
+                        "profile_id": track.profile_id,
+                        "transcript_hash": track.transcript_hash,
+                        "script_version": track.script_version,
+                        "media_path": track.media_path,
+                        "mime_type": track.mime_type,
+                        "size_bytes": track.size_bytes,
+                        "duration_ms": track.duration_ms,
+                        "checksum_sha256": track.checksum_sha256,
+                        "generation_metadata": track.generation_metadata_json,
+                        "status": track.status,
+                        "reviewed_by": track.reviewed_by,
+                        "reviewed_at": iso(track.reviewed_at),
+                        "published_at": iso(track.published_at),
+                    }
+                    for track in story_tracks
+                ],
+            }
+            if home_publication
+            else None
+        ),
         "fragments": fragment_payloads,
         "sources": [
             {
@@ -2033,6 +2623,12 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
         db.execute(delete(PhotoMission).where(PhotoMission.fragment_id.in_(old_fragment_ids)))
         db.execute(delete(StoryFragment).where(StoryFragment.id.in_(old_fragment_ids)))
     if old_arc:
+        db.execute(
+            delete(HomeStoryPublication).where(HomeStoryPublication.arc_id == old_arc.id)
+        )
+        db.execute(
+            delete(StoryNarrationTrack).where(StoryNarrationTrack.arc_id == old_arc.id)
+        )
         db.delete(old_arc)
     stop_ids = list(db.scalars(select(Stop.id).where(Stop.route_id == route.id)))
     if stop_ids:
@@ -2190,6 +2786,58 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
                     fragment_id=fragment_id, required_fragment_id=str(required_id)
                 )
             )
+    home_story_data = dict(graph.get("home_story") or {})
+    if home_story_data:
+        now = datetime.now(UTC)
+        track_ids: set[str] = set()
+        for raw_track in home_story_data.pop("tracks", []) or []:
+            track_data = dict(raw_track)
+            track_id = str(track_data.pop("id"))
+            track_ids.add(track_id)
+            db.add(
+                StoryNarrationTrack(
+                    id=track_id,
+                    arc_id=arc.id,
+                    profile_id=str(track_data.get("profile_id") or ""),
+                    transcript_hash=str(track_data.get("transcript_hash") or ""),
+                    script_version=str(track_data.get("script_version") or ""),
+                    media_path=str(track_data.get("media_path") or ""),
+                    mime_type=str(track_data.get("mime_type") or "audio/mpeg"),
+                    size_bytes=int(track_data.get("size_bytes") or 0),
+                    duration_ms=int(track_data.get("duration_ms") or 0),
+                    checksum_sha256=track_data.get("checksum_sha256"),
+                    generation_metadata_json=dict(
+                        track_data.get("generation_metadata") or {}
+                    ),
+                    status=str(track_data.get("status") or "draft"),
+                    reviewed_by=track_data.get("reviewed_by"),
+                    reviewed_at=_parse_datetime(track_data.get("reviewed_at")),
+                    published_at=_parse_datetime(track_data.get("published_at")),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        selected_track_id = home_story_data.get("selected_track_id")
+        if selected_track_id and str(selected_track_id) not in track_ids:
+            selected_track_id = None
+        db.flush()
+        db.add(
+            HomeStoryPublication(
+                id=str(home_story_data.get("id") or uuid4()),
+                arc_id=arc.id,
+                selected_track_id=(str(selected_track_id) if selected_track_id else None),
+                title=str(home_story_data.get("title") or arc.title),
+                introduction=str(home_story_data.get("introduction") or ""),
+                cover_image=str(home_story_data.get("cover_image") or ""),
+                selection_weight=int(home_story_data.get("selection_weight") or 1),
+                status=str(home_story_data.get("status") or "draft"),
+                reviewed_by=home_story_data.get("reviewed_by"),
+                reviewed_at=_parse_datetime(home_story_data.get("reviewed_at")),
+                published_at=_parse_datetime(home_story_data.get("published_at")),
+                created_at=now,
+                updated_at=now,
+            )
+        )
     db.flush()
 
 

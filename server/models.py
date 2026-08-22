@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
 class Base(DeclarativeBase):
@@ -185,6 +185,13 @@ class StoryArc(Base):
     source_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
     publication_decision: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
+    story_narration_tracks: Mapped[list[StoryNarrationTrack]] = relationship(
+        back_populates="arc", cascade="all, delete-orphan"
+    )
+    home_story_publication: Mapped[HomeStoryPublication | None] = relationship(
+        back_populates="arc", cascade="all, delete-orphan", uselist=False
+    )
+
 
 class StoryFragment(Base):
     __tablename__ = "story_fragments"
@@ -258,6 +265,77 @@ class FragmentNarrationTrack(Base):
     generation_metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StoryNarrationTrack(Base):
+    __tablename__ = "story_narration_tracks"
+    __table_args__ = (
+        UniqueConstraint(
+            "arc_id",
+            "profile_id",
+            "transcript_hash",
+            "script_version",
+            name="uq_story_voice_script",
+        ),
+        Index("ix_story_narration_tracks_hash_status", "transcript_hash", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    arc_id: Mapped[str] = mapped_column(String(36), ForeignKey("story_arcs.id"), index=True)
+    profile_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("narration_voice_profiles.id"), index=True
+    )
+    transcript_hash: Mapped[str] = mapped_column(String(64), index=True)
+    script_version: Mapped[str] = mapped_column(String(40))
+    media_path: Mapped[str] = mapped_column(String(500))
+    mime_type: Mapped[str] = mapped_column(String(80), default="audio/mpeg")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    checksum_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    generation_metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    arc: Mapped[StoryArc] = relationship(back_populates="story_narration_tracks")
+
+
+class HomeStoryPublication(Base):
+    __tablename__ = "home_story_publications"
+    __table_args__ = (
+        Index(
+            "ix_home_story_publications_status_weight",
+            "status",
+            "selection_weight",
+            "published_at",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    arc_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("story_arcs.id"), unique=True, index=True
+    )
+    selected_track_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("story_narration_tracks.id"), nullable=True, index=True
+    )
+    title: Mapped[str] = mapped_column(String(255))
+    introduction: Mapped[str] = mapped_column(Text)
+    cover_image: Mapped[str] = mapped_column(String(500))
+    selection_weight: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    arc: Mapped[StoryArc] = relationship(back_populates="home_story_publication")
+    selected_track: Mapped[StoryNarrationTrack | None] = relationship(
+        foreign_keys=[selected_track_id]
+    )
 
 
 class FragmentClaim(Base):

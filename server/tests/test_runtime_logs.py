@@ -782,6 +782,83 @@ class FragmentedContentApiTests(unittest.TestCase):
         object_path = Path(_TEMP_DIR.name) / "media" / shared_b["object_key"]
         self.assertTrue(object_path.is_file())
 
+    def test_home_story_review_publish_withdraw_and_stale_track_guard(self):
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
+        )
+        self.assertEqual(imported.status_code, 201, imported.text)
+        self.client.post("/api/admin/routes/route-test/submit-review", headers=self.headers)
+        self.client.post("/api/admin/routes/route-test/verify", headers=self.headers)
+        published_route = self.client.post(
+            "/api/admin/routes/route-test/publish", headers=self.headers
+        )
+        self.assertEqual(published_route.status_code, 200, published_route.text)
+
+        saved = self.client.put(
+            "/api/admin/home-stories/arc-test",
+            headers=self.headers,
+            json={
+                "title": "城墙听见的故事",
+                "introduction": "给自己两分钟，听一座城慢慢开口。",
+                "cover_image": "images/route.png",
+                "selection_weight": 3,
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertIn("尚未选择完整故事音频", saved.json()["blockers"])
+
+        profile_id = self.client.get(
+            "/api/admin/narration/profiles", headers=self.headers
+        ).json()[0]["id"]
+        uploaded = self.client.post(
+            "/api/admin/home-stories/arc-test/upload",
+            headers=self.headers,
+            data={"profile_id": profile_id, "duration_ms": "42000"},
+            files={"file": ("story.mp3", b"manual-story-audio", "audio/mpeg")},
+        )
+        self.assertEqual(uploaded.status_code, 201, uploaded.text)
+        self.assertEqual(uploaded.json()["tracks"][0]["duration_ms"], 42000)
+        self.assertTrue(uploaded.json()["tracks"][0]["is_current"])
+
+        generated = self.client.post(
+            "/api/admin/home-stories/arc-test/generate",
+            headers=self.headers,
+            json={},
+        )
+        self.assertEqual(generated.status_code, 201, generated.text)
+        track = generated.json()["tracks"][0]
+        self.assertTrue(track["is_current"])
+        audio = self.client.get(
+            f"/api/admin{track['playback_path']}", headers=self.headers
+        )
+        self.assertEqual(audio.status_code, 200, audio.text)
+
+        for action, expected in (
+            ("submit-review", "in_review"),
+            ("approve", "approved"),
+            ("publish", "published"),
+            ("withdraw", "withdrawn"),
+            ("archive", "archived"),
+        ):
+            transitioned = self.client.post(
+                f"/api/admin/home-stories/arc-test/{action}", headers=self.headers
+            )
+            self.assertEqual(transitioned.status_code, 200, transitioned.text)
+            self.assertEqual(transitioned.json()["publication"]["status"], expected)
+
+        # A changed canonical transcript can never reuse the previously approved audio.
+        with main.SessionLocal() as db:
+            arc = db.get(main.StoryArc, "arc-test")
+            arc.complete_story = "正文已经更新，旧音频不应再次发布。"
+            db.commit()
+        stale = self.client.get(
+            "/api/admin/home-stories", headers=self.headers
+        ).json()[0]
+        self.assertFalse(stale["tracks"][0]["is_current"])
+        self.assertIn("已选音频与当前正文不一致，请重新生成", stale["blockers"])
+
 
 class RuntimeLogApiTests(unittest.TestCase):
     @classmethod
