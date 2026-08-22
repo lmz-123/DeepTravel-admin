@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   appendBounded,
+  appendUniqueBounded,
   filterLogEvents,
   type LogLevel,
   nextReconnectDelay,
@@ -48,6 +49,14 @@ test("bounds rows and applies level and keyword filters", () => {
     ["3"],
   );
   assert.deepEqual(filterLogEvents(rows, new Set<LogLevel>(["warning", "error"]), "slow").map((row) => row.cursor), ["2"]);
+});
+
+test("deduplicates cursor-resumed client events", () => {
+  const rows = appendUniqueBounded(
+    [event("7", "info", "already visible")],
+    [event("7", "info", "already visible"), event("8", "error", "new event")],
+  );
+  assert.deepEqual(rows.map((row) => row.cursor), ["7", "8"]);
 });
 
 test("buffers paused events, reports overflow, clears locally, and caps reconnect delay", () => {

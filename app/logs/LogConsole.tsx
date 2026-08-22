@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  appendBounded,
+  appendUniqueBounded,
   filterLogEvents,
   LogLevel,
   nextReconnectDelay,
@@ -37,19 +37,9 @@ const stateLabels: Record<ConnectionState, string> = {
 
 export default function LogConsole({ apiBase, token, onNotice }: { apiBase: string; token: string; onNotice: (message: string) => void }) {
   const [sources, setSources] = useState<SourceResponse | null>(null);
-  const [selected, setSelected] = useState("client");
-  const [rows, setRows] = useState<RuntimeLogEvent[]>([]);
+  const [backendSource, setBackendSource] = useState("");
   const [enabledLevels, setEnabledLevels] = useState<Set<LogLevel>>(() => new Set(levels));
   const [keyword, setKeyword] = useState("");
-  const [paused, setPaused] = useState(false);
-  const [autoScroll, setAutoScroll] = useState(true);
-  const [connection, setConnection] = useState<ConnectionState>("idle");
-  const [pendingCount, setPendingCount] = useState(0);
-  const [skippedCount, setSkippedCount] = useState(0);
-  const pausedRef = useRef(false);
-  const pendingRef = useRef(new PauseBuffer(240));
-  const cursorRef = useRef<string | null>(null);
-  const viewportRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -57,16 +47,17 @@ export default function LogConsole({ apiBase, token, onNotice }: { apiBase: stri
       try {
         const response = await fetch(`${apiBase.replace(/\/$/, "")}/logs/sources`, {
           headers: { Authorization: `Bearer ${token}` },
+          cache: "no-store",
           signal: controller.signal,
         });
         if (!response.ok) throw new Error(`日志来源读取失败 (${response.status})`);
         const data = await response.json() as SourceResponse;
         setSources(data);
-        const firstBackend = data.backend.find((source) => source.available);
-        setSelected(firstBackend ? `backend:${firstBackend.id}` : "client");
+        setBackendSource((current) => current && data.backend.some((source) => source.id === current)
+          ? current
+          : data.backend.find((source) => source.available)?.id ?? data.backend[0]?.id ?? "");
       } catch (error) {
         if ((error as Error).name !== "AbortError") {
-          setConnection("unavailable");
           onNotice(error instanceof Error ? error.message : "无法读取日志来源");
         }
       }
@@ -75,14 +66,124 @@ export default function LogConsole({ apiBase, token, onNotice }: { apiBase: stri
     return () => controller.abort();
   }, [apiBase, token, onNotice]);
 
+  function toggleLevel(level: LogLevel) {
+    setEnabledLevels((current) => {
+      const next = new Set(current);
+      if (next.has(level)) next.delete(level); else next.add(level);
+      return next;
+    });
+  }
+
+  const selectedBackend = sources?.backend.find((source) => source.id === backendSource);
+  return <section className="log-console" aria-label="实时运行日志">
+    <div className="log-summary">
+      <div><p className="eyebrow">LIVE OBSERVABILITY</p><h2>客户端与服务端实时运行流</h2><p>两个窗口独立保持连接；客户端记录保留 {sources?.limits.retention_days ?? "—"} 天。</p></div>
+      <div className="dual-live-badge"><i /><span>双流实时跟随</span></div>
+    </div>
+
+    <div className="log-global-toolbar">
+      <label className="log-search"><span className="sr-only">搜索全部日志</span><input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="同时搜索客户端与服务端消息、分类或上下文…" /></label>
+      <div className="level-filters" aria-label="全部窗口日志级别筛选">
+        {levels.map((level) => <button className={enabledLevels.has(level) ? `level-chip ${level} active` : `level-chip ${level}`} aria-pressed={enabledLevels.has(level)} onClick={() => toggleLevel(level)} key={level}><i />{levelLabels[level]}</button>)}
+      </div>
+    </div>
+
+    <div className="log-stream-grid">
+      <LogPane
+        key={`client:${apiBase}`}
+        eyebrow="FLUTTER CLIENT"
+        title="客户端运行日志"
+        description="异常、接口失败、照片上传与生命周期"
+        source="client"
+        apiBase={apiBase}
+        token={token}
+        levels={enabledLevels}
+        keyword={keyword}
+        onNotice={onNotice}
+      />
+      <LogPane
+        key={`backend:${apiBase}:${backendSource}`}
+        eyebrow="SERVER CONTAINER"
+        title="服务端运行日志"
+        description="Docker 容器 stdout / stderr"
+        source={selectedBackend?.available ? `backend:${backendSource}` : null}
+        apiBase={apiBase}
+        token={token}
+        levels={enabledLevels}
+        keyword={keyword}
+        onNotice={onNotice}
+        sourceControl={<label className="pane-source-select"><span className="sr-only">选择服务端日志来源</span><select value={backendSource} onChange={(event) => setBackendSource(event.target.value)}>{sources?.backend.map((source) => <option value={source.id} disabled={!source.available} key={source.id}>{source.label}{source.available ? "" : "（不可用）"}</option>)}</select></label>}
+      />
+    </div>
+  </section>;
+}
+
+function LogPane({ eyebrow, title, description, source, apiBase, token, levels: enabledLevels, keyword, onNotice, sourceControl }: {
+  eyebrow: string;
+  title: string;
+  description: string;
+  source: string | null;
+  apiBase: string;
+  token: string;
+  levels: ReadonlySet<LogLevel>;
+  keyword: string;
+  onNotice: (message: string) => void;
+  sourceControl?: React.ReactNode;
+}) {
+  const stream = useRuntimeLogStream({ source, apiBase, token, onNotice });
+  const viewportRef = useRef<HTMLDivElement>(null);
+  const visibleRows = useMemo(
+    () => filterLogEvents(stream.rows, enabledLevels, keyword),
+    [stream.rows, enabledLevels, keyword],
+  );
+
   useEffect(() => {
-    if (!sources || !selected) return;
+    if (!stream.autoScroll || stream.paused || !viewportRef.current) return;
+    viewportRef.current.scrollTo({ top: viewportRef.current.scrollHeight, behavior: "smooth" });
+  }, [stream.rows, stream.autoScroll, stream.paused]);
+
+  return <article className="log-pane">
+    <header className="log-pane-header">
+      <div><p className="eyebrow">{eyebrow}</p><h3>{title}</h3><small>{description}</small></div>
+      <div className="pane-head-actions">{sourceControl}<div className={`stream-state ${stream.connection}`} role="status"><i />{stream.paused ? "已暂停显示" : stateLabels[stream.connection]}</div></div>
+    </header>
+    <div className="pane-toolbar">
+      <div className="log-actions">
+        <button className={stream.paused ? "primary-button" : "ghost-button"} onClick={stream.togglePause} aria-pressed={stream.paused}>{stream.paused ? `继续${stream.pendingCount ? ` · ${stream.pendingCount}` : ""}` : "暂停"}</button>
+        <button className="ghost-button" onClick={stream.clearView}>清空</button>
+      </div>
+      <label className="auto-scroll"><input type="checkbox" checked={stream.autoScroll} onChange={(event) => stream.setAutoScroll(event.target.checked)} />自动滚动</label>
+      <span className="log-count">{visibleRows.length} / {stream.rows.length}{stream.skippedCount ? ` · 跳过 ${stream.skippedCount}` : ""}</span>
+    </div>
+
+    {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+    <div className="log-viewport" ref={viewportRef} role="region" tabIndex={0} aria-label={`${title}，可使用方向键滚动`} aria-live={stream.paused ? "off" : "polite"}>
+      {visibleRows.map((row) => <article className={`log-row ${row.level}`} key={`${row.source_type}-${row.source}-${row.cursor}-${row.occurred_at}`}>
+        <time dateTime={row.occurred_at}>{formatTime(row.occurred_at)}</time>
+        <span className="log-level">{row.level.toUpperCase()}</span>
+        <span className="log-origin">{row.source}<small>{row.category}</small></span>
+        <div className="log-message"><p>{row.message}{row.truncated && <em> 已截断</em>}</p>{Object.keys(row.context || {}).length > 0 && <details><summary>上下文</summary><pre>{JSON.stringify(row.context, null, 2)}</pre></details>}</div>
+      </article>)}
+      {!visibleRows.length && <div className="log-empty"><span>⌁</span><strong>{stream.connection === "connected" ? "实时连接已建立，等待新事件" : stream.connection === "unavailable" ? "当前日志来源不可用" : "正在建立日志连接"}</strong><small>收到事件后会自动追加，无需刷新页面</small></div>}
+    </div>
+  </article>;
+}
+
+function useRuntimeLogStream({ source, apiBase, token, onNotice }: { source: string | null; apiBase: string; token: string; onNotice: (message: string) => void }) {
+  const [rows, setRows] = useState<RuntimeLogEvent[]>([]);
+  const [paused, setPaused] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true);
+  const [connection, setConnection] = useState<ConnectionState>(source ? "idle" : "unavailable");
+  const [pendingCount, setPendingCount] = useState(0);
+  const [skippedCount, setSkippedCount] = useState(0);
+  const pausedRef = useRef(false);
+  const pendingRef = useRef(new PauseBuffer(240));
+  const cursorRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!source) return;
     const controller = new AbortController();
-    const decoder = new TextDecoder();
     let retry = 0;
-    let stopped = false;
-    cursorRef.current = null;
-    pendingRef.current.clear();
 
     function accept(event: RuntimeLogEvent) {
       if (event.source_type === "client") cursorRef.current = event.cursor;
@@ -92,16 +193,16 @@ export default function LogConsole({ apiBase, token, onNotice }: { apiBase: stri
         setSkippedCount(pendingRef.current.skipped);
         return;
       }
-      setRows((current) => appendBounded(current, [event]));
+      setRows((current) => appendUniqueBounded(current, [event]));
     }
 
     async function connect() {
-      while (!controller.signal.aborted && !stopped) {
+      while (!controller.signal.aborted) {
         setConnection(retry ? "reconnecting" : "connecting");
-        const isClient = selected === "client";
+        const isClient = source === "client";
         const path = isClient
           ? `/logs/client/stream?tail=240${cursorRef.current ? `&after=${encodeURIComponent(cursorRef.current)}` : ""}`
-          : `/logs/backend/stream?source=${encodeURIComponent(selected.slice("backend:".length))}&tail=240`;
+          : `/logs/backend/stream?source=${encodeURIComponent(source.slice("backend:".length))}&tail=240`;
         try {
           const response = await fetch(`${apiBase.replace(/\/$/, "")}${path}`, {
             headers: { Authorization: `Bearer ${token}`, Accept: "text/event-stream" },
@@ -115,16 +216,26 @@ export default function LogConsole({ apiBase, token, onNotice }: { apiBase: stri
           setConnection("connected");
           retry = 0;
           const reader = response.body.getReader();
+          const decoder = new TextDecoder();
           const parser = new SseParser();
           while (!controller.signal.aborted) {
             const { done, value } = await reader.read();
             if (done) break;
-            for (const envelope of parser.push(decoder.decode(value, { stream: true }))) {
+            const envelopes = parser.push(decoder.decode(value, { stream: true }));
+            let sourceEnded = false;
+            for (const envelope of envelopes) {
               if (envelope.event === "log" && envelope.data && typeof envelope.data === "object") {
                 accept(envelope.data as RuntimeLogEvent);
               } else if (envelope.event === "source_status") {
                 setConnection("unavailable");
+                sourceEnded = true;
+              } else if (envelope.event === "heartbeat" || envelope.event === "metadata") {
+                setConnection("connected");
               }
+            }
+            if (sourceEnded) {
+              await reader.cancel();
+              break;
             }
           }
         } catch (error) {
@@ -132,6 +243,7 @@ export default function LogConsole({ apiBase, token, onNotice }: { apiBase: stri
           setConnection("reconnecting");
           if (retry === 0) onNotice(error instanceof Error ? error.message : "实时日志连接中断");
         }
+        if (controller.signal.aborted) return;
         retry += 1;
         const delay = nextReconnectDelay(retry);
         await new Promise<void>((resolve) => {
@@ -142,21 +254,14 @@ export default function LogConsole({ apiBase, token, onNotice }: { apiBase: stri
     }
 
     void connect();
-    return () => { stopped = true; controller.abort(); };
-  }, [apiBase, token, selected, sources, onNotice]);
-
-  useEffect(() => {
-    if (!autoScroll || paused || !viewportRef.current) return;
-    viewportRef.current.scrollTo({ top: viewportRef.current.scrollHeight, behavior: "smooth" });
-  }, [rows, autoScroll, paused]);
-
-  const visibleRows = useMemo(() => filterLogEvents(rows, enabledLevels, keyword), [rows, enabledLevels, keyword]);
+    return () => controller.abort();
+  }, [apiBase, token, source, onNotice]);
 
   function togglePause() {
     if (pausedRef.current) {
       pausedRef.current = false;
       setPaused(false);
-      setRows((current) => appendBounded(current, pendingRef.current.drain()));
+      setRows((current) => appendUniqueBounded(current, pendingRef.current.drain()));
       setPendingCount(0);
     } else {
       pausedRef.current = true;
@@ -171,59 +276,7 @@ export default function LogConsole({ apiBase, token, onNotice }: { apiBase: stri
     setSkippedCount(0);
   }
 
-  function chooseSource(value: string) {
-    cursorRef.current = null;
-    pendingRef.current.clear();
-    setRows([]);
-    setPendingCount(0);
-    setSkippedCount(0);
-    setSelected(value);
-  }
-
-  function toggleLevel(level: LogLevel) {
-    setEnabledLevels((current) => {
-      const next = new Set(current);
-      if (next.has(level)) next.delete(level); else next.add(level);
-      return next;
-    });
-  }
-
-  return <section className="log-console" aria-label="实时运行日志">
-    <div className="log-summary">
-      <div><p className="eyebrow">LIVE OBSERVABILITY</p><h2>运行状态流</h2><p>后端输出即时跟随；客户端记录保留 {sources?.limits.retention_days ?? "—"} 天。</p></div>
-      <div className={`stream-state ${connection}`} role="status"><i />{paused ? "已暂停显示" : stateLabels[connection]}</div>
-    </div>
-
-    <div className="log-toolbar">
-      <label className="log-source-field"><span>日志来源</span><select value={selected} onChange={(event) => chooseSource(event.target.value)} aria-label="选择日志来源">
-        <option value="client">客户端 · Flutter</option>
-        {sources?.backend.map((source) => <option value={`backend:${source.id}`} disabled={!source.available} key={source.id}>后端 · {source.label}{source.available ? "" : "（不可用）"}</option>)}
-      </select></label>
-      <label className="log-search"><span className="sr-only">搜索日志</span><input value={keyword} onChange={(event) => setKeyword(event.target.value)} placeholder="搜索消息、分类或会话…" /></label>
-      <div className="log-actions">
-        <button className={paused ? "primary-button" : "ghost-button"} onClick={togglePause} aria-pressed={paused}>{paused ? `继续${pendingCount ? ` · ${pendingCount}` : ""}` : "暂停"}</button>
-        <button className="ghost-button" onClick={clearView}>清空视图</button>
-      </div>
-    </div>
-
-    <div className="level-filters" aria-label="日志级别筛选">
-      {levels.map((level) => <button className={enabledLevels.has(level) ? `level-chip ${level} active` : `level-chip ${level}`} aria-pressed={enabledLevels.has(level)} onClick={() => toggleLevel(level)} key={level}><i />{levelLabels[level]}</button>)}
-      <label className="auto-scroll"><input type="checkbox" checked={autoScroll} onChange={(event) => setAutoScroll(event.target.checked)} />自动滚动</label>
-      <span className="log-count">显示 {visibleRows.length} / 已接收 {rows.length}{skippedCount ? ` · 跳过 ${skippedCount}` : ""}</span>
-    </div>
-
-    {/* Keyboard focus is required so non-pointer users can scroll this live region. */}
-    {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
-    <div className="log-viewport" ref={viewportRef} role="region" tabIndex={0} aria-label="日志内容，可使用方向键滚动" aria-live={paused ? "off" : "polite"}>
-      {visibleRows.map((row, index) => <article className={`log-row ${row.level}`} key={`${row.cursor}-${index}`}>
-        <time dateTime={row.occurred_at}>{formatTime(row.occurred_at)}</time>
-        <span className="log-level">{row.level.toUpperCase()}</span>
-        <span className="log-origin">{row.source}<small>{row.category}</small></span>
-        <div className="log-message"><p>{row.message}{row.truncated && <em> 已截断</em>}</p>{Object.keys(row.context || {}).length > 0 && <details><summary>上下文</summary><pre>{JSON.stringify(row.context, null, 2)}</pre></details>}</div>
-      </article>)}
-      {!visibleRows.length && <div className="log-empty"><span>⌁</span><strong>{connection === "connected" ? "等待新的日志事件" : "正在建立日志连接"}</strong><small>这里不会填充演示数据</small></div>}
-    </div>
-  </section>;
+  return { rows, paused, autoScroll, setAutoScroll, connection, pendingCount, skippedCount, togglePause, clearView };
 }
 
 function formatTime(value: string) {

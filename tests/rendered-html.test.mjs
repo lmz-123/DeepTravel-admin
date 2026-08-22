@@ -48,6 +48,8 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.match(admin, /"logs", "08", "运行日志"/);
   assert.match(logConsole, /Authorization.*Bearer/);
   assert.match(logConsole, /text\/event-stream/);
-  assert.match(logConsole, /这里不会填充演示数据/);
+  assert.match(logConsole, /客户端运行日志/);
+  assert.match(logConsole, /服务端运行日志/);
+  assert.match(logConsole, /无需刷新页面/);
   assert.doesNotMatch(`${page}\n${layout}`, /codex-preview|_sites-preview/);
 });

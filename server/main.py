@@ -392,7 +392,12 @@ async def stream_client_logs(request: Request, _: Auth, after: int | None = None
     return StreamingResponse(
         limited_stream(source, stream_limiter),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache, no-store, no-transform",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -444,7 +449,12 @@ async def stream_backend_logs(request: Request, _: Auth, source: str, tail: int 
     return StreamingResponse(
         limited_stream(stream, stream_limiter),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+        headers={
+            "Cache-Control": "no-cache, no-store, no-transform",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 

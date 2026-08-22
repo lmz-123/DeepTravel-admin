@@ -66,6 +66,29 @@ export function appendBounded(
   return combined.length > limit ? combined.slice(combined.length - limit) : combined;
 }
 
+export function appendUniqueBounded(
+  current: RuntimeLogEvent[],
+  incoming: RuntimeLogEvent[],
+  limit = 600,
+): RuntimeLogEvent[] {
+  if (!incoming.length) return current;
+  const seen = new Set(current.map(eventIdentity));
+  const unique = incoming.filter((event) => {
+    const identity = eventIdentity(event);
+    if (seen.has(identity)) return false;
+    seen.add(identity);
+    return true;
+  });
+  return appendBounded(current, unique, limit);
+}
+
+function eventIdentity(event: RuntimeLogEvent): string {
+  if (event.source_type === "client") {
+    return `${event.source_type}:${event.source}:${event.cursor}`;
+  }
+  return `${event.source_type}:${event.source}:${event.occurred_at}:${event.level}:${event.message}`;
+}
+
 export function filterLogEvents(
   rows: RuntimeLogEvent[],
   levels: ReadonlySet<LogLevel>,

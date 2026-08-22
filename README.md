@@ -65,11 +65,11 @@ curl -fsS -X POST \
   -d '{"events":[{"occurred_at":"2026-08-22T12:00:00+08:00","level":"info","category":"diagnostic","message":"client log pipeline ready","session_id":"manual-check","app_version":"manual","platform":"curl","source":"deployment-check","context":{"check":true}}]}'
 ```
 
-进入后台“运行日志”，切换到“客户端 · Flutter”即可看到这条记录。页面不生成演示日志。
+进入后台“运行日志”即可在同一页面看到“客户端运行日志”和“服务端运行日志”两个持续连接的窗口。两边会自动追加新事件，不需要刷新页面。
 
 ## Flutter 客户端上报协议
 
-当前管理仓库已提供收集、存储和实时查看能力；只有接入下面协议的 APK 才会产生真实客户端运行日志。接收令牌与 `ADMIN_TOKEN` 必须不同，且不授予任何管理权限。
+DeepTravel 主仓库客户端已接入下面协议，会提交框架异常、接口失败、照片上传状态及少量生命周期事件。接收令牌与 `ADMIN_TOKEN` 必须不同，且不授予任何管理权限。
 
 ```http
 POST /api/runtime/client-logs
