@@ -40,4 +40,4 @@
 
 - [x] 7.1 Run Python unit/API tests, frontend tests, lint, production build, and strict OpenSpec validation; fix all regressions introduced by the change.
 - [x] 7.2 Exercise a local end-to-end stream with synthetic backend and client events, confirming redaction, filters, pause/resume, cursor reconnect, and bounded retention.
-- [ ] 7.3 Commit the completed change on `main` and push it to the `DeepTravel-admin` origin after verifying no unrelated files are included.
+- [x] 7.3 Commit the completed change on `main` and push it to the `DeepTravel-admin` origin after verifying no unrelated files are included.
