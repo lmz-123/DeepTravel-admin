@@ -23,6 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from content_graph import validate_graph
+from content_schema import ensure_photo_mission_guidance_schema
 from models import (
     Challenge,
     City,
@@ -193,6 +194,7 @@ async def lifespan(_: FastAPI):
     if hmac.compare_digest(settings.admin_token, settings.client_log_ingest_token):
         raise RuntimeError("CLIENT_LOG_INGEST_TOKEN 必须与 ADMIN_TOKEN 不同")
     ensure_client_log_schema(engine)
+    ensure_photo_mission_guidance_schema(engine)
     await asyncio.to_thread(run_log_retention)
     yield
 
@@ -1916,6 +1918,9 @@ def _route_content(db: Session, route: Route) -> dict[str, Any]:
                     "id": mission.id,
                     "prompt": mission.prompt,
                     "field_subject": mission.field_subject,
+                    "vantage_point": mission.vantage_point,
+                    "shooting_direction": mission.shooting_direction,
+                    "composition_tip": mission.composition_tip,
                     "safety_copy": mission.safety_copy,
                     "accessibility_alternative": mission.accessibility_alternative,
                     "authenticity_label": mission.authenticity_label,
@@ -2163,6 +2168,9 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
                     fragment_id=fragment_id,
                     prompt=str(mission.get("prompt") or ""),
                     field_subject=str(mission.get("field_subject") or ""),
+                    vantage_point=mission.get("vantage_point"),
+                    shooting_direction=mission.get("shooting_direction"),
+                    composition_tip=mission.get("composition_tip"),
                     safety_copy=str(mission.get("safety_copy") or ""),
                     accessibility_alternative=str(
                         mission.get("accessibility_alternative") or ""

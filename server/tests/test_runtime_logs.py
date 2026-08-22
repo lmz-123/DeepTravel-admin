@@ -18,10 +18,11 @@ os.environ["LOG_SOURCES"] = "travel-api=deeptravel-api-1"
 os.environ["NARRATION_PROVIDER"] = "fake"
 
 from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine  # noqa: E402
+from sqlalchemy import create_engine, inspect, text  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 import main  # noqa: E402
+from content_schema import ensure_photo_mission_guidance_schema  # noqa: E402
 from models import (  # noqa: E402
     Base,
     ClientRuntimeLog,
@@ -149,6 +150,45 @@ class StorageTests(unittest.TestCase):
             self.assertEqual(len(query_client_events(db, limit=10)), 2)
 
 
+class ContentSchemaTests(unittest.TestCase):
+    def test_guidance_columns_are_added_to_legacy_table_idempotently(self):
+        database = create_engine("sqlite+pysqlite:///:memory:")
+        with database.begin() as connection:
+            connection.execute(
+                text(
+                    "CREATE TABLE photo_missions ("
+                    "id VARCHAR(36) PRIMARY KEY, fragment_id VARCHAR(36), prompt TEXT)"
+                )
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO photo_missions (id, fragment_id, prompt) "
+                    "VALUES ('legacy', 'fragment', '旧照片任务')"
+                )
+            )
+
+        ensure_photo_mission_guidance_schema(database)
+        ensure_photo_mission_guidance_schema(database)
+
+        columns = {
+            column["name"] for column in inspect(database).get_columns("photo_missions")
+        }
+        self.assertTrue(
+            {"vantage_point", "shooting_direction", "composition_tip"}.issubset(
+                columns
+            )
+        )
+        with database.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT prompt, vantage_point, shooting_direction, composition_tip "
+                    "FROM photo_missions WHERE id = 'legacy'"
+                )
+            ).one()
+        self.assertEqual(row.prompt, "旧照片任务")
+        self.assertEqual(tuple(row)[1:], (None, None, None))
+
+
 class StreamingPrimitiveTests(unittest.TestCase):
     def test_sse_and_limiter_are_bounded(self):
         wire = sse_message("log", {"message": "你好"}, cursor="9")
@@ -227,7 +267,7 @@ class FragmentedContentApiTests(unittest.TestCase):
                 {"id": "claim-one", "canonical_text": "第一件事存在", "claim_kind": "fact", "certainty": "documented", "review_state": "reviewed", "boundary_note": "", "supersedes_claim_id": None, "reviewed_by": "tester", "reviewed_at": "2026-08-22T00:00:00Z", "source_ids": ["source-test"], "support_notes": {"source-test": "直接支持"}},
                 {"id": "claim-two", "canonical_text": "第二件事存在", "claim_kind": "fact", "certainty": "documented", "review_state": "reviewed", "boundary_note": "", "supersedes_claim_id": None, "reviewed_by": "tester", "reviewed_at": "2026-08-22T00:00:00Z", "source_ids": ["source-test"], "support_notes": {"source-test": "直接支持"}},
             ],
-            "required_photo_mission_count": 1,
+            "required_photo_mission_count": 0,
             "fragments": [
                 self.fragment("fragment-one", 1, "audio/one.m4a", "claim-one", 22.5000, 114.0000, [], True),
                 self.fragment("fragment-two", 2, "audio/two.m4a", "claim-two", 22.5030, 114.0030, ["fragment-one"], False),
@@ -238,7 +278,7 @@ class FragmentedContentApiTests(unittest.TestCase):
         script = f"第 {position} 段经过审核的旁白。"
         value = {"id": identity, "position": position, "title": f"线索 {position}", "safe_preview": "请继续前行", "narration_script": script, "transcript": script, "audio_path": audio, "audio_mime_type": "audio/mp4", "audio_size_bytes": 9, "script_version": "test-v1", "interaction_type": "photo" if mission else "passive", "completion_threshold": 0.9, "key_claim": "经过来源支持的主张", "answers_question": "回答前一问", "raises_question": "提出下一问", "authenticity_label": "documented", "review_state": "reviewed", "dependency_ids": dependencies, "claim_ids": [claim], "trigger_region": {"id": f"trigger-{position}", "latitude": latitude, "longitude": longitude, "entry_radius_m": 50, "exit_radius_m": 85, "max_accuracy_m": 35, "qualifying_samples": 2, "sample_window_seconds": 15, "cooldown_seconds": 120, "audit_state": "reviewed", "coordinate_system": "WGS84", "source_coordinate_system": "WGS84", "coordinate_source": "现场 GPS 复核", "field_notes": "公共步行区域"}}
         if mission:
-            value["photo_mission"] = {"id": "mission-one", "prompt": "拍摄现场标志", "field_subject": "公共标志", "safety_copy": "请勿进入车道", "accessibility_alternative": "可拍摄邻近导览牌", "authenticity_label": "documented", "required": True, "audit_state": "reviewed"}
+            value["photo_mission"] = {"id": "mission-one", "prompt": "拍摄现场标志", "field_subject": "公共标志", "vantage_point": "站在公共步道内侧的导览牌旁", "shooting_direction": "朝向现场标志正面", "composition_tip": "保留标志与周边环境，主体置于画面中央", "safety_copy": "请勿进入车道", "accessibility_alternative": "可拍摄邻近导览牌", "authenticity_label": "documented", "required": False, "audit_state": "reviewed"}
         return value
 
     def test_import_validate_publish_idempotency_and_version_lock(self):
@@ -273,6 +313,13 @@ class FragmentedContentApiTests(unittest.TestCase):
         self.assertEqual(
             [item["id"] for item in saved.json()["content"]["fragments"]],
             ["fragment-one", "fragment-two"],
+        )
+        saved_mission = saved.json()["content"]["fragments"][0]["photo_mission"]
+        self.assertEqual(saved_mission["vantage_point"], "站在公共步道内侧的导览牌旁")
+        self.assertEqual(saved_mission["shooting_direction"], "朝向现场标志正面")
+        self.assertEqual(
+            saved_mission["composition_tip"],
+            "保留标志与周边环境，主体置于画面中央",
         )
         protected_media = self.client.delete(
             "/api/admin/media/audio-one", headers=self.headers
@@ -319,6 +366,39 @@ class FragmentedContentApiTests(unittest.TestCase):
         self.assertEqual(submitted.status_code, 200, submitted.text)
         verified = self.client.post("/api/admin/routes/invalid-route/verify", headers=self.headers)
         self.assertEqual(verified.status_code, 422, verified.text)
+
+    def test_validation_rejects_missing_photo_guidance_with_field_paths(self):
+        payload = self.payload()
+        payload["package_id"] = "missing-guidance-package"
+        payload["package_version"] = "missing-guidance-v1"
+        payload["route"]["id"] = "missing-guidance-route"
+        payload["route"]["slug"] = "missing-guidance-route"
+        payload["story_arc"]["id"] = "missing-guidance-arc"
+        mission = payload["fragments"][0]["photo_mission"]
+        for key in ("vantage_point", "shooting_direction", "composition_tip"):
+            mission.pop(key)
+
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=payload,
+        )
+
+        self.assertEqual(imported.status_code, 201, imported.text)
+        validation = imported.json()["validation"]
+        self.assertFalse(validation["valid"])
+        self.assertEqual(
+            {
+                issue["path"]
+                for issue in validation["errors"]
+                if issue["code"] == "photo_guidance_required"
+            },
+            {
+                "fragments[0].photo_mission.vantage_point",
+                "fragments[0].photo_mission.shooting_direction",
+                "fragments[0].photo_mission.composition_tip",
+            },
+        )
 
     def test_import_rewrites_legacy_package_paths_to_registered_cloud_objects(self):
         payload = self.payload()

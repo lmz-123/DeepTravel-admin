@@ -115,6 +115,18 @@ def validate_graph(graph: dict[str, Any], media_assets: dict[str, str]) -> dict[
             for key in ("prompt", "field_subject", "safety_copy", "accessibility_alternative"):
                 if not str(mission.get(key) or "").strip():
                     error(f"{path}.photo_mission.{key}", "required", "照片任务缺少安全说明")
+            guidance_labels = {
+                "vantage_point": "安全站位 / 经典机位",
+                "shooting_direction": "拍摄朝向",
+                "composition_tip": "构图建议",
+            }
+            for key, label in guidance_labels.items():
+                if not str(mission.get(key) or "").strip():
+                    error(
+                        f"{path}.photo_mission.{key}",
+                        "photo_guidance_required",
+                        f"照片留念缺少{label}",
+                    )
 
     if actual_missions != required_missions:
         error("required_photo_mission_count", "mission_count_mismatch", "必做照片任务数量不匹配")

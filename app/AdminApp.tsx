@@ -1452,7 +1452,7 @@ function FragmentedRouteWorkspace({
                     <b>{graph.sources.length}</b> 个来源
                   </span>
                   <span>
-                    <b>{graph.required_photo_mission_count}</b> 个必做照片任务
+                    <b>{graph.required_photo_mission_count}</b> 个阻塞式照片任务（建议保持 0）
                   </span>
                 </div>
               </article>
@@ -1631,7 +1631,7 @@ function FragmentedRouteWorkspace({
                       </Field>
                       {Object.keys(mission).length > 0 && (
                         <>
-                          <div className="fragment-subhead">现场照片任务</div>
+                          <div className="fragment-subhead">现场照片留念（不阻塞路线）</div>
                           <Field label="拍摄提示">
                             <textarea
                               rows={2}
@@ -1646,6 +1646,53 @@ function FragmentedRouteWorkspace({
                               }
                             />
                           </Field>
+                          <div className="form-grid three">
+                            <Field label="安全站位 / 经典机位">
+                              <textarea
+                                rows={3}
+                                placeholder="例如：站在观景平台内侧，距栏杆一步，避开车行道"
+                                value={str(mission.vantage_point)}
+                                onChange={(event) =>
+                                  updateNestedFragment(
+                                    index,
+                                    "photo_mission",
+                                    "vantage_point",
+                                    event.target.value,
+                                  )
+                                }
+                              />
+                            </Field>
+                            <Field label="拍摄朝向">
+                              <textarea
+                                rows={3}
+                                placeholder="例如：镜头朝东南，对准钟楼正面"
+                                value={str(mission.shooting_direction)}
+                                onChange={(event) =>
+                                  updateNestedFragment(
+                                    index,
+                                    "photo_mission",
+                                    "shooting_direction",
+                                    event.target.value,
+                                  )
+                                }
+                              />
+                            </Field>
+                            <Field label="构图建议">
+                              <textarea
+                                rows={3}
+                                placeholder="例如：让拱门占画面上三分之一，人物放在右下交点"
+                                value={str(mission.composition_tip)}
+                                onChange={(event) =>
+                                  updateNestedFragment(
+                                    index,
+                                    "photo_mission",
+                                    "composition_tip",
+                                    event.target.value,
+                                  )
+                                }
+                              />
+                            </Field>
+                          </div>
                           <Field label="安全提醒">
                             <input
                               value={str(mission.safety_copy)}
