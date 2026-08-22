@@ -109,11 +109,27 @@ type NarrationPreviewView = {
   id: string;
   status: string;
   error_code?: string | null;
+  provider: string;
+  model: string;
+  voice_id: string;
   emotion: string;
   speed: number;
   pitch: number;
   playback_path?: string | null;
   metadata: Data;
+};
+type NarrationVariant = {
+  label: string;
+  emotion: string;
+  speed: number;
+  pitch: number;
+};
+type NarrationConfigView = {
+  provider: string;
+  model: string;
+  default_voice_id: string;
+  supported_emotions: string[];
+  presets: NarrationVariant[];
 };
 
 const navItems: Array<[Tab, string, string]> = [
@@ -1718,16 +1734,48 @@ function NarrationAudition({
   const [previews, setPreviews] = useState<NarrationPreviewView[]>([]);
   const [audioUrls, setAudioUrls] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
+  const [provider, setProvider] = useState("");
+  const [model, setModel] = useState("");
+  const [voiceId, setVoiceId] = useState("");
+  const [emotions, setEmotions] = useState(["neutral", "happy"]);
+  const [variants, setVariants] = useState<NarrationVariant[]>([]);
   const objectUrls = useRef<string[]>([]);
 
   useEffect(() => () => objectUrls.current.forEach(URL.revokeObjectURL), []);
+
+  useEffect(() => {
+    let active = true;
+    request<NarrationConfigView>("/narration/config")
+      .then((config) => {
+        if (!active) return;
+        setProvider(config.provider);
+        setModel(config.model);
+        setVoiceId(config.default_voice_id);
+        setEmotions(config.supported_emotions);
+        setVariants(config.presets);
+      })
+      .catch((error) => {
+        if (active) setNotice(error instanceof Error ? error.message : "音色配置加载失败");
+      });
+    return () => { active = false; };
+  }, [request, setNotice]);
+
+  function updateVariant(index: number, changes: Partial<NarrationVariant>) {
+    setVariants((current) => current.map((item, itemIndex) =>
+      itemIndex === index ? { ...item, ...changes } : item));
+  }
 
   async function generate() {
     setBusy(true);
     try {
       const value = await request<{ previews: NarrationPreviewView[] }>(
         `/fragments/${fragmentId}/narration/previews`,
-        { method: "POST", body: JSON.stringify({}) },
+        {
+          method: "POST",
+          body: JSON.stringify({
+            variants: variants.map((variant) => ({ ...variant, voice_id: voiceId.trim() })),
+          }),
+        },
       );
       setPreviews(value.previews);
       const ready = value.previews.filter((item) => item.status === "ready").length;
@@ -1771,14 +1819,46 @@ function NarrationAudition({
   return (
     <section className="narration-audition">
       <div className="fragment-subhead">情感旁白试听</div>
-      <p>同一文字稿生成沉静纪实、温和导览和故事张力三个版本；批准前不会改变线上音频。</p>
-      <button className="ghost-button" onClick={() => void generate()} disabled={busy || !fragmentId}>
+      <p>在这里配置音色 ID、情绪、语速和音调。三个版本使用同一文字稿，批准前不会改变线上音频。</p>
+      <div className="narration-provider-line">
+        <span>服务：{provider || "加载中"}</span>
+        <span>模型：{model || "加载中"}</span>
+      </div>
+      <label className="field narration-voice-field">
+        <span>音色 Voice ID</span>
+        <input
+          aria-label="音色 Voice ID"
+          value={voiceId}
+          onChange={(event) => setVoiceId(event.target.value)}
+          placeholder="例如 Chinese (Mandarin)_Gentleman"
+        />
+      </label>
+      <div className="narration-settings-grid">
+        {variants.map((variant, index) => <article key={`${variant.label}-${index}`}>
+          <strong>{variant.label}</strong>
+          <label className="field">
+            <span>情绪</span>
+            <select value={variant.emotion} onChange={(event) => updateVariant(index, { emotion: event.target.value })}>
+              {emotions.map((emotion) => <option key={emotion} value={emotion}>{emotion}</option>)}
+            </select>
+          </label>
+          <label className="field">
+            <span>语速</span>
+            <input type="number" min="0.5" max="2" step="0.01" value={variant.speed} onChange={(event) => updateVariant(index, { speed: Number(event.target.value) })} />
+          </label>
+          <label className="field">
+            <span>音调</span>
+            <input type="number" min="-12" max="12" step="1" value={variant.pitch} onChange={(event) => updateVariant(index, { pitch: Number(event.target.value) })} />
+          </label>
+        </article>)}
+      </div>
+      <button className="ghost-button" onClick={() => void generate()} disabled={busy || !fragmentId || !voiceId.trim() || variants.length < 3}>
         {busy ? "处理中…" : "生成 3 个试听版本"}
       </button>
       {previews.length > 0 && <div className="narration-preview-grid">
         {previews.map((item) => <article key={item.id}>
           <strong>{str(item.metadata.label) || item.emotion}</strong>
-          <small>{item.emotion} · {item.speed}× · pitch {item.pitch}</small>
+          <small>{item.voice_id} · {item.emotion} · {item.speed}× · pitch {item.pitch}</small>
           {item.status === "failed" ? <em>暂不可用：{item.error_code}</em> : <>
             {!audioUrls[item.id] ? <button onClick={() => void loadAudio(item)}>加载试听</button> : <>
               {/* eslint-disable-next-line jsx-a11y/media-has-caption -- the exact transcript is visible in the fragment editor */}

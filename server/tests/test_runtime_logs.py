@@ -379,15 +379,29 @@ class FragmentedContentApiTests(unittest.TestCase):
         before = self.client.get("/api/admin/routes/route-test/content", headers=self.headers).json()
         old_audio = before["fragments"][0]["audio_path"]
 
+        config = self.client.get("/api/admin/narration/config", headers=self.headers)
+        self.assertEqual(config.status_code, 200, config.text)
+        self.assertEqual(config.json()["default_voice_id"], main.settings.minimax_voice_id)
+        self.assertEqual(len(config.json()["presets"]), 3)
+
         generated = self.client.post(
             "/api/admin/fragments/fragment-one/narration/previews",
             headers=self.headers,
-            json={},
+            json={
+                "variants": [
+                    {"label": "A", "voice_id": "voice-field-test", "emotion": "neutral", "speed": 0.91, "pitch": -2},
+                    {"label": "B", "voice_id": "voice-field-test", "emotion": "happy", "speed": 1.01, "pitch": 0},
+                    {"label": "C", "voice_id": "voice-field-test", "emotion": "surprised", "speed": 0.96, "pitch": 2},
+                ]
+            },
         )
         self.assertEqual(generated.status_code, 201, generated.text)
         previews = generated.json()["previews"]
         self.assertEqual(len(previews), 3)
         self.assertTrue(all(item["status"] == "ready" for item in previews))
+        self.assertTrue(all(item["voice_id"] == "voice-field-test" for item in previews))
+        self.assertEqual([item["emotion"] for item in previews], ["neutral", "happy", "surprised"])
+        self.assertEqual([item["pitch"] for item in previews], [-2, 0, 2])
         unchanged = self.client.get("/api/admin/routes/route-test/content", headers=self.headers).json()
         self.assertEqual(unchanged["fragments"][0]["audio_path"], old_audio)
 

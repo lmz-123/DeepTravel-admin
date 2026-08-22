@@ -294,6 +294,14 @@ h2 { font-size: 21px; }
 .field input:focus, .field select:focus, .field textarea:focus { border-color: #6f927f; box-shadow: 0 0 0 3px #6f927f18; }
 .narration-audition { margin: 8px 0 20px; padding: 15px; border: 1px solid #d9d4c9; border-radius: 9px; background: #f7f4ed; }
 .narration-audition > p { margin: -3px 0 12px; color: var(--muted); font-size: 11px; line-height: 1.65; }
+.narration-provider-line { display: flex; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 12px; color: var(--muted); font-size: 9px; }
+.narration-voice-field { margin-bottom: 12px; }
+.narration-settings-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-bottom: 12px; }
+.narration-settings-grid article { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; padding: 11px; border: 1px solid #e2ddd2; border-radius: 7px; background: #fff; }
+.narration-settings-grid article > strong { grid-column: 1 / -1; color: var(--ink); font-size: 11px; }
+.narration-settings-grid article > .field:first-of-type { grid-column: 1 / -1; }
+.narration-settings-grid .field { gap: 4px; font-size: 9px; }
+.narration-settings-grid .field input, .narration-settings-grid .field select { padding: 7px 8px; font-size: 10px; }
 .narration-preview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; margin-top: 13px; }
 .narration-preview-grid article { display: grid; align-content: start; gap: 7px; min-width: 0; padding: 11px; border-radius: 7px; background: #fff; box-shadow: 0 2px 12px #1b2e2410; }
 .narration-preview-grid strong { color: var(--ink); font-size: 12px; }
@@ -360,7 +368,7 @@ h2 { font-size: 21px; }
   .upload-panel { align-items: stretch; flex-direction: column; }
   .upload-panel form { align-items: stretch; flex-direction: column; }
   .form-grid, .form-grid.three { grid-template-columns: 1fr; }
-  .narration-preview-grid { grid-template-columns: 1fr; }
+  .narration-settings-grid, .narration-preview-grid { grid-template-columns: 1fr; }
   .log-summary { align-items: flex-start; flex-direction: column; }
   .log-global-toolbar { padding: 13px; }
   .log-stream-grid { padding: 9px; gap: 9px; }

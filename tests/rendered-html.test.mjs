@@ -54,6 +54,10 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.match(admin, /verified: \{ endpoint: "publish"/);
   assert.match(admin, /已审核 · 未发布/);
   assert.match(admin, /生成 3 个试听版本/);
+  assert.match(admin, /\/narration\/config/);
+  assert.match(admin, /音色 Voice ID/);
+  assert.match(admin, /语速/);
+  assert.match(admin, /音调/);
   assert.match(admin, /最终因果链/);
   assert.match(admin, /史实来源与主张/);
   assert.match(logConsole, /Authorization.*Bearer/);

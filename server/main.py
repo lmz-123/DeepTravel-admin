@@ -920,6 +920,33 @@ def narration_preview_dict(item: NarrationPreview) -> dict[str, Any]:
     }
 
 
+def narration_default_variants() -> list[dict[str, Any]]:
+    return [
+        {"label": "沉静纪实", "emotion": "neutral", "speed": 0.92, "pitch": -1},
+        {"label": "温和导览", "emotion": "neutral", "speed": 1.0, "pitch": 0},
+        {"label": "故事张力", "emotion": "happy", "speed": 0.96, "pitch": 1},
+    ]
+
+
+@app.get("/api/admin/narration/config")
+def narration_config(_: Auth):
+    return {
+        "provider": narration_synthesizer.provider,
+        "model": narration_synthesizer.model,
+        "default_voice_id": settings.minimax_voice_id,
+        "supported_emotions": [
+            "neutral",
+            "happy",
+            "sad",
+            "angry",
+            "fearful",
+            "disgusted",
+            "surprised",
+        ],
+        "presets": narration_default_variants(),
+    }
+
+
 @app.post("/api/admin/fragments/{fragment_id}/narration/previews", status_code=201)
 def generate_narration_previews(fragment_id: str, payload: dict[str, Any], _: Auth, db: Db):
     fragment = db.get(StoryFragment, fragment_id)
@@ -928,12 +955,7 @@ def generate_narration_previews(fragment_id: str, payload: dict[str, Any], _: Au
     transcript = fragment.narration_script.strip()
     if not transcript:
         raise HTTPException(422, "旁白文字稿不能为空")
-    defaults = [
-        {"label": "沉静纪实", "emotion": "neutral", "speed": 0.92, "pitch": -1},
-        {"label": "温和导览", "emotion": "neutral", "speed": 1.0, "pitch": 0},
-        {"label": "故事张力", "emotion": "happy", "speed": 0.96, "pitch": 1},
-    ]
-    variants = payload.get("variants") or defaults
+    variants = payload.get("variants") or narration_default_variants()
     if not isinstance(variants, list) or not 3 <= len(variants) <= 5:
         raise HTTPException(422, "一次需要生成 3 到 5 个试听版本")
     pronunciation = tuple(str(item) for item in payload.get("pronunciation") or [])
