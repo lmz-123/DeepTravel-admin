@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import tempfile
 import unittest
@@ -309,6 +310,68 @@ class FragmentedContentApiTests(unittest.TestCase):
         self.assertEqual(submitted.status_code, 200, submitted.text)
         verified = self.client.post("/api/admin/routes/invalid-route/verify", headers=self.headers)
         self.assertEqual(verified.status_code, 422, verified.text)
+
+    def test_import_rewrites_legacy_package_paths_to_registered_cloud_objects(self):
+        payload = self.payload()
+        payload["package_id"] = "cloud-alias-package"
+        payload["route"]["id"] = "cloud-alias-route"
+        payload["route"]["slug"] = "cloud-alias-route"
+        payload["story_arc"]["id"] = "cloud-alias-arc"
+        now = datetime.now(UTC)
+        mappings = {
+            "cover": ("public/content/cloud-cover.png", b"png", "image/png"),
+            "audio-one": (
+                "public/content/cloud-one.m4a",
+                b"audio-one",
+                "audio/mp4",
+            ),
+            "audio-two": (
+                "public/content/cloud-two.m4a",
+                b"audio-two",
+                "audio/mp4",
+            ),
+        }
+        with main.SessionLocal() as db:
+            for key, (object_key, content, mime_type) in mappings.items():
+                target = Path(_TEMP_DIR.name) / "media" / object_key
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(content)
+                db.add(
+                    MediaAsset(
+                        key=key,
+                        storage_path=object_key,
+                        mime_type=mime_type,
+                        storage_provider="oss",
+                        object_key=object_key,
+                        canonical_url=f"https://cdn.example.test/{object_key}",
+                        visibility="public",
+                        size_bytes=len(content),
+                        checksum_sha256=hashlib.sha256(content).hexdigest(),
+                        metadata_json={},
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            db.commit()
+
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=payload,
+        )
+        self.assertEqual(imported.status_code, 201, imported.text)
+        self.assertTrue(imported.json()["validation"]["valid"], imported.text)
+        graph = self.client.get(
+            "/api/admin/routes/cloud-alias-route/content", headers=self.headers
+        ).json()
+        self.assertEqual(
+            graph["route"]["hero_image"],
+            "https://cdn.example.test/public/content/cloud-cover.png",
+        )
+        self.assertEqual(
+            graph["fragments"][0]["audio_path"],
+            "https://cdn.example.test/public/content/cloud-one.m4a",
+        )
 
     def test_three_narration_previews_do_not_bind_until_approval(self):
         imported = self.client.post("/api/admin/fragmented-routes/import", headers=self.headers, json=self.payload())

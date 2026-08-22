@@ -1161,7 +1161,12 @@ def import_content(payload: dict[str, Any], _: Auth, db: Db):
 
 
 def _media_catalog(db: Session) -> dict[str, str]:
-    return {item.storage_path: item.mime_type for item in db.scalars(select(MediaAsset))}
+    catalog: dict[str, str] = {}
+    for item in db.scalars(select(MediaAsset)):
+        for reference in (item.storage_path, item.object_key, item.canonical_url):
+            if reference:
+                catalog[reference] = item.mime_type
+    return catalog
 
 
 def _published_route_locked(db: Session, route: Route) -> bool:
@@ -1721,18 +1726,29 @@ def import_fragmented_route(payload: dict[str, Any], _: Auth, db: Db):
     if not package_id or not package_version:
         raise HTTPException(422, "package_id 和 package_version 必填")
     now = datetime.now(UTC)
+    media_aliases: dict[str, str] = {}
     for raw in payload.get("media") or []:
         media_data = dict(raw)
         asset_key = str(media_data.get("key") or "").strip()
         storage_path = str(media_data.get("storage_path") or "").strip()
         mime_type = str(media_data.get("mime_type") or "").strip()
+        checksum = str(media_data.get("sha256") or "").strip().lower()
         if not asset_key or not storage_path or not mime_type.startswith(("image/", "audio/")):
             raise HTTPException(422, "media 中的 key、storage_path 和图片/音频 MIME 必填")
         item = db.get(MediaAsset, asset_key)
-        path_owner = db.scalar(select(MediaAsset).where(or_(MediaAsset.storage_path == storage_path, MediaAsset.canonical_url == storage_path)))
-        if item is not None and path_owner is not None and item.key != path_owner.key:
-            raise HTTPException(409, f"媒体 key 与路径分别属于不同资源：{asset_key}")
-        item = item or path_owner
+        if item is None:
+            item = db.scalar(
+                select(MediaAsset).where(
+                    or_(
+                        MediaAsset.storage_path == storage_path,
+                        MediaAsset.canonical_url == storage_path,
+                    )
+                )
+            )
+        if item is None and checksum:
+            item = db.scalar(
+                select(MediaAsset).where(MediaAsset.checksum_sha256 == checksum)
+            )
         if item is None:
             if public_object_storage.provider != "local":
                 raise HTTPException(422, f"请先在媒体库上传并登记资源：{asset_key}")
@@ -1741,10 +1757,13 @@ def import_fragmented_route(payload: dict[str, Any], _: Auth, db: Db):
                 raise HTTPException(422, f"媒体文件不存在：{storage_path}")
             db.add(MediaAsset(key=asset_key, storage_path=storage_path, mime_type=mime_type, storage_provider="local", object_key=storage_path, visibility="public", size_bytes=candidate.stat().st_size, metadata_json={}, created_at=now, updated_at=now))
         else:
-            if item.storage_path != storage_path and item.canonical_url != storage_path:
-                raise HTTPException(409, f"媒体路径与已登记资源不匹配：{asset_key}")
+            if checksum and item.checksum_sha256 and item.checksum_sha256 != checksum:
+                raise HTTPException(409, f"媒体校验和与已登记资源不匹配：{asset_key}")
             item.mime_type = mime_type
             item.updated_at = now
+            media_aliases[storage_path] = item.canonical_url or item.storage_path
+    if media_aliases:
+        payload = _replace_media_aliases(payload, media_aliases)
     existing = db.scalar(select(Route).where(Route.managed_package_id == package_id))
     if existing and existing.managed_package_version == package_version:
         db.commit()
@@ -1808,3 +1827,16 @@ def import_fragmented_route(payload: dict[str, Any], _: Auth, db: Db):
         "route": route_dict(route),
         "validation": validate_graph(graph, _media_catalog(db)),
     }
+
+
+def _replace_media_aliases(value: Any, aliases: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        return aliases.get(value, value)
+    if isinstance(value, list):
+        return [_replace_media_aliases(item, aliases) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _replace_media_aliases(item, aliases)
+            for key, item in value.items()
+        }
+    return value
