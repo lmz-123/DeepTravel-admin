@@ -72,6 +72,10 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.match(admin, /新建音色/);
   assert.match(admin, /当前文字稿覆盖/);
   assert.match(admin, /发布音色/);
+  assert.match(admin, /已发布到客户端/);
+  assert.match(admin, /新音频已立即发布生效/);
+  assert.match(admin, /不需要重复点击发布/);
+  assert.match(admin, /暂不能发布/);
   assert.match(admin, /设为默认/);
   assert.match(admin, /最终因果链/);
   assert.match(admin, /史实来源与主张/);

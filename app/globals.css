@@ -183,6 +183,9 @@ h2 { font-size: 21px; }
 .voice-coverage span, .voice-coverage small { color: var(--muted); font-size: 9px; }
 .voice-coverage small { max-width: 350px; }
 .voice-profile-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+.voice-published-state { display: grid; gap: 2px; min-width: 230px; padding: 8px 11px; border: 1px solid #a9c2ad; border-radius: 7px; background: #edf5ed; color: #315d3d; }
+.voice-published-state strong { font-size: 10px; }
+.voice-published-state small { color: #5f7865; font-size: 8px; line-height: 1.4; }
 .voice-route-generator { display: grid; gap: 12px; padding: 15px; border: 1px solid #b9c9b9; border-radius: 10px; background: linear-gradient(135deg, #f4f8f1, #fffdf7); }
 .voice-route-generator h3 { margin: 2px 0 5px; color: var(--forest); font: 19px Georgia, serif; }
 .voice-route-generator p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.65; }

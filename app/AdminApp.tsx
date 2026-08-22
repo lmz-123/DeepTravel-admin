@@ -161,6 +161,7 @@ type NarrationConfigView = {
 };
 type NarrationBatchResult = {
   route_id: string;
+  profile: NarrationProfileView;
   generated_count: number;
   failed_count: number;
   skipped_count: number;
@@ -1940,7 +1941,11 @@ function NarrationProfilePanel({
       if (value.failed_count) {
         setNotice(`已保存 ${value.generated_count} 条，${value.failed_count} 条失败；可直接重试失败节点`);
       } else if (value.generated_count) {
-        setNotice(`整条路线已生成并保存 ${value.generated_count} 条正式音频`);
+        setNotice(
+          value.profile.status === "published"
+            ? `整条路线已生成并保存 ${value.generated_count} 条正式音频，新音频已立即发布生效`
+            : `整条路线已生成并保存 ${value.generated_count} 条正式音频，请点击“发布音色”上线`,
+        );
       } else {
         setNotice("当前音色已经覆盖整条路线，无需重复生成");
       }
@@ -2063,7 +2068,21 @@ function NarrationProfilePanel({
           </section>
           <div className="voice-profile-actions">
             <button className="ghost-button" disabled={busy} onClick={() => void mutate(`/narration/profiles/${selected.id}`, { method: "PUT", body: JSON.stringify(draft) }, "音色档案已保存")}>保存档案</button>
-            <button className="primary-button" disabled={busy || !coverage?.ready || selected.status === "published"} onClick={() => void mutate(`/narration/profiles/${selected.id}/publish`, { method: "POST", body: JSON.stringify({ route_id: routeId }) }, "音色已发布到客户端")}>发布音色</button>
+            {selected.status === "published" ? (
+              <div className="voice-published-state" role="status">
+                <strong>✓ 已发布到客户端</strong>
+                <small>该音色重新生成并保存后会立即生效，不需要重复点击发布。</small>
+              </div>
+            ) : (
+              <button
+                className="primary-button"
+                disabled={busy || !coverage?.ready}
+                title={coverage?.ready ? "将完整音色发布到客户端" : "必须先生成并保存全部故事节点"}
+                onClick={() => void mutate(`/narration/profiles/${selected.id}/publish`, { method: "POST", body: JSON.stringify({ route_id: routeId }) }, "音色已发布到客户端")}
+              >
+                {coverage?.ready ? "发布音色到客户端" : `还缺 ${incomplete} 个节点，暂不能发布`}
+              </button>
+            )}
             <button className="ghost-button" disabled={busy || selected.is_default || selected.status !== "published"} onClick={() => void mutate(`/narration/profiles/${selected.id}/set-default`, { method: "POST" }, "已设为路线默认音色")}>设为默认</button>
             <button className="danger-link" disabled={busy || selected.is_default} onClick={() => void mutate(`/narration/profiles/${selected.id}/archive`, { method: "POST" }, "音色已归档")}>归档</button>
           </div>
