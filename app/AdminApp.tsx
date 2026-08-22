@@ -118,6 +118,33 @@ type NarrationPreviewView = {
   playback_path?: string | null;
   metadata: Data;
 };
+type NarrationProfileView = {
+  id: string;
+  slug: string;
+  display_name: string;
+  description: string;
+  provider: string;
+  model: string;
+  voice_id: string;
+  emotion: string;
+  speed: number;
+  pitch: number;
+  preview_media_path?: string | null;
+  display_order: number;
+  status: string;
+  is_default: boolean;
+  published_at?: string | null;
+};
+type NarrationCoverage = {
+  route_id: string;
+  profile_id: string;
+  total: number;
+  complete_count: number;
+  complete_fragment_ids: string[];
+  missing: Array<{ id: string; title: string }>;
+  stale: Array<{ id: string; title: string }>;
+  ready: boolean;
+};
 type NarrationVariant = {
   label: string;
   emotion: string;
@@ -213,7 +240,9 @@ export default function AdminApp() {
           .catch(() => ({ detail: `请求失败 (${response.status})` }));
         const detail = Array.isArray(body.detail)
           ? body.detail.map((x: { msg?: string }) => x.msg).join("；")
-          : body.detail;
+          : typeof body.detail === "object" && body.detail
+            ? body.detail.message || JSON.stringify(body.detail)
+            : body.detail;
         throw new Error(detail || `请求失败 (${response.status})`);
       }
       if (response.status === 204) return undefined as T;
@@ -992,6 +1021,23 @@ function FragmentedRouteWorkspace({
   const [jsonMode, setJsonMode] = useState(false);
   const [jsonContent, setJsonContent] = useState("");
   const [busy, setBusy] = useState(false);
+  const [narrationProfiles, setNarrationProfiles] = useState<NarrationProfileView[]>([]);
+  const [narrationProfileId, setNarrationProfileId] = useState("");
+  const [narrationCoverage, setNarrationCoverage] = useState<NarrationCoverage | null>(null);
+
+  const loadNarrationProfiles = useCallback(async () => {
+    try {
+      const rows = await request<NarrationProfileView[]>("/narration/profiles");
+      setNarrationProfiles(rows);
+      setNarrationProfileId((current) =>
+        rows.some((item) => item.id === current)
+          ? current
+          : rows.find((item) => item.is_default)?.id || rows[0]?.id || "",
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "读取音色档案失败");
+    }
+  }, [request, setNotice]);
 
   const load = useCallback(
     async (id: string) => {
@@ -1019,6 +1065,39 @@ function FragmentedRouteWorkspace({
     const timer = window.setTimeout(() => void load(routeId), 0);
     return () => window.clearTimeout(timer);
   }, [routeId, load]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadNarrationProfiles(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadNarrationProfiles]);
+
+  const loadNarrationCoverage = useCallback(async () => {
+    if (!routeId || !narrationProfileId) {
+      setNarrationCoverage(null);
+      return;
+    }
+    try {
+      setNarrationCoverage(await request<NarrationCoverage>(
+        `/routes/${routeId}/narration/coverage?profile_id=${encodeURIComponent(narrationProfileId)}`,
+      ));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "读取音色覆盖率失败");
+    }
+  }, [narrationProfileId, request, routeId, setNotice]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadNarrationCoverage(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadNarrationCoverage]);
+
+  const selectedNarrationProfile = narrationProfiles.find(
+    (item) => item.id === narrationProfileId,
+  );
+
+  async function refreshNarration() {
+    await loadNarrationProfiles();
+    await loadNarrationCoverage();
+  }
 
   function updateArc(key: string, value: unknown) {
     setGraph((current) =>
@@ -1259,6 +1338,16 @@ function FragmentedRouteWorkspace({
               {str(graph.package_id)} · {str(graph.package_version)}
             </span>
           </div>
+          <NarrationProfilePanel
+            routeId={routeId}
+            profiles={narrationProfiles}
+            selectedProfileId={narrationProfileId}
+            coverage={narrationCoverage}
+            request={request}
+            setNotice={setNotice}
+            onSelect={setNarrationProfileId}
+            onChanged={() => void refreshNarration()}
+          />
           {jsonMode ? (
             <article className="panel graph-json">
               <textarea
@@ -1436,9 +1525,13 @@ function FragmentedRouteWorkspace({
                       </div>
                       <NarrationAudition
                         fragmentId={str(fragment.id)}
+                        profile={selectedNarrationProfile}
                         request={request}
                         setNotice={setNotice}
-                        onApproved={() => void load(routeId)}
+                        onApproved={() => {
+                          void load(routeId);
+                          void loadNarrationCoverage();
+                        }}
                       />
                       <div className="fragment-subhead">WGS-84 定位触发</div>
                       <div className="form-grid three">
@@ -1720,13 +1813,142 @@ function FragmentedRouteWorkspace({
   );
 }
 
+function NarrationProfilePanel({
+  routeId,
+  profiles,
+  selectedProfileId,
+  coverage,
+  request,
+  setNotice,
+  onSelect,
+  onChanged,
+}: {
+  routeId: string;
+  profiles: NarrationProfileView[];
+  selectedProfileId: string;
+  coverage: NarrationCoverage | null;
+  request: <T>(p: string, i?: RequestInit) => Promise<T>;
+  setNotice: (x: string) => void;
+  onSelect: (id: string) => void;
+  onChanged: () => void;
+}) {
+  const selected = profiles.find((item) => item.id === selectedProfileId);
+  const [creating, setCreating] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [drafts, setDrafts] = useState<Record<string, Partial<NarrationProfileView>>>({});
+
+  async function mutate(path: string, init: RequestInit, success: string) {
+    setBusy(true);
+    try {
+      const value = await request<NarrationProfileView | { profile: NarrationProfileView }>(path, init);
+      const profile = "profile" in value ? value.profile : value;
+      onSelect(profile.id);
+      setNotice(success);
+      onChanged();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "音色操作失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function create(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const data = new FormData(event.currentTarget);
+    await mutate("/narration/profiles", {
+      method: "POST",
+      body: JSON.stringify({
+        slug: data.get("slug"),
+        display_name: data.get("display_name"),
+        description: data.get("description"),
+        voice_id: data.get("voice_id"),
+        display_order: Number(data.get("display_order") || 10),
+      }),
+    }, "新音色档案已创建，请为每条线索生成并批准音频");
+    setCreating(false);
+  }
+
+  if (!selected) return null;
+  const draft = drafts[selected.id] || selected;
+  const updateDraft = (changes: Partial<NarrationProfileView>) =>
+    setDrafts((current) => ({
+      ...current,
+      [selected.id]: { ...(current[selected.id] || selected), ...changes },
+    }));
+  return (
+    <article className="panel narration-profile-panel">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">NARRATION VOICES</p>
+          <h2>路线讲述音色</h2>
+          <p>只有覆盖全部当前文字稿的已发布音色，才会出现在客户端选择器。</p>
+        </div>
+        <button className="ghost-button" onClick={() => setCreating((value) => !value)}>
+          {creating ? "取消新建" : "新建音色"}
+        </button>
+      </div>
+      {creating && (
+        <form className="voice-create-form" onSubmit={(event) => void create(event)}>
+          <label className="field"><span>英文标识</span><input name="slug" required placeholder="warm-storyteller" /></label>
+          <label className="field"><span>客户端名称</span><input name="display_name" required placeholder="温柔讲述者" /></label>
+          <label className="field"><span>Voice ID</span><input name="voice_id" required placeholder="供应商音色 ID" /></label>
+          <label className="field"><span>排序</span><input name="display_order" type="number" defaultValue="10" /></label>
+          <label className="field full"><span>客户端风格说明</span><input name="description" placeholder="温暖、克制，适合边走边听" /></label>
+          <button className="primary-button" disabled={busy}>创建草稿</button>
+        </form>
+      )}
+      <div className="voice-profile-layout">
+        <div className="voice-profile-list" role="listbox" aria-label="音色档案">
+          {profiles.map((profile) => (
+            <button
+              key={profile.id}
+              className={profile.id === selectedProfileId ? "active" : ""}
+              onClick={() => onSelect(profile.id)}
+              role="option"
+              aria-selected={profile.id === selectedProfileId}
+            >
+              <span>{profile.display_name}</span>
+              <small>{profile.status}{profile.is_default ? " · 默认" : ""}</small>
+            </button>
+          ))}
+        </div>
+        <div className="voice-profile-editor">
+          <div className="voice-coverage">
+            <div><strong>{coverage?.complete_count ?? 0}/{coverage?.total ?? 0}</strong><span>当前文字稿覆盖</span></div>
+            <StatusTag status={coverage?.ready ? "published" : "in_review"} />
+            {!!coverage?.missing.length && <small>缺少：{coverage.missing.map((item) => item.title).join("、")}</small>}
+            {!!coverage?.stale.length && <small>已过期：{coverage.stale.map((item) => item.title).join("、")}</small>}
+          </div>
+          <div className="form-grid three">
+            <Field label="客户端名称"><input value={str(draft.display_name)} onChange={(event) => updateDraft({ display_name: event.target.value })} /></Field>
+            <Field label="Voice ID"><input value={str(draft.voice_id)} onChange={(event) => updateDraft({ voice_id: event.target.value })} /></Field>
+            <Field label="排序"><input type="number" value={num(draft.display_order, 0)} onChange={(event) => updateDraft({ display_order: Number(event.target.value) })} /></Field>
+            <Field label="默认情绪"><input value={str(draft.emotion)} onChange={(event) => updateDraft({ emotion: event.target.value })} /></Field>
+            <Field label="默认语速"><input type="number" min="0.5" max="2" step="0.01" value={num(draft.speed, 1)} onChange={(event) => updateDraft({ speed: Number(event.target.value) })} /></Field>
+            <Field label="默认音调"><input type="number" min="-12" max="12" value={num(draft.pitch, 0)} onChange={(event) => updateDraft({ pitch: Number(event.target.value) })} /></Field>
+          </div>
+          <Field label="客户端风格说明"><textarea rows={2} value={str(draft.description)} onChange={(event) => updateDraft({ description: event.target.value })} /></Field>
+          <div className="voice-profile-actions">
+            <button className="ghost-button" disabled={busy} onClick={() => void mutate(`/narration/profiles/${selected.id}`, { method: "PUT", body: JSON.stringify(draft) }, "音色档案已保存")}>保存档案</button>
+            <button className="primary-button" disabled={busy || !coverage?.ready || selected.status === "published"} onClick={() => void mutate(`/narration/profiles/${selected.id}/publish`, { method: "POST", body: JSON.stringify({ route_id: routeId }) }, "音色已发布到客户端")}>发布音色</button>
+            <button className="ghost-button" disabled={busy || selected.is_default || selected.status !== "published"} onClick={() => void mutate(`/narration/profiles/${selected.id}/set-default`, { method: "POST" }, "已设为路线默认音色")}>设为默认</button>
+            <button className="danger-link" disabled={busy || selected.is_default} onClick={() => void mutate(`/narration/profiles/${selected.id}/archive`, { method: "POST" }, "音色已归档")}>归档</button>
+          </div>
+        </div>
+      </div>
+    </article>
+  );
+}
+
 function NarrationAudition({
   fragmentId,
+  profile,
   request,
   setNotice,
   onApproved,
 }: {
   fragmentId: string;
+  profile?: NarrationProfileView;
   request: <T>(p: string, i?: RequestInit) => Promise<T>;
   setNotice: (x: string) => void;
   onApproved: () => void;
@@ -1748,17 +1970,22 @@ function NarrationAudition({
     request<NarrationConfigView>("/narration/config")
       .then((config) => {
         if (!active) return;
-        setProvider(config.provider);
-        setModel(config.model);
-        setVoiceId(config.default_voice_id);
+        setProvider(profile?.provider || config.provider);
+        setModel(profile?.model || config.model);
+        setVoiceId(profile?.voice_id || config.default_voice_id);
         setEmotions(config.supported_emotions);
-        setVariants(config.presets);
+        setVariants(config.presets.map((item) => profile ? {
+          ...item,
+          emotion: profile.emotion || item.emotion,
+          speed: profile.speed,
+          pitch: profile.pitch,
+        } : item));
       })
       .catch((error) => {
         if (active) setNotice(error instanceof Error ? error.message : "音色配置加载失败");
       });
     return () => { active = false; };
-  }, [request, setNotice]);
+  }, [profile, request, setNotice]);
 
   function updateVariant(index: number, changes: Partial<NarrationVariant>) {
     setVariants((current) => current.map((item, itemIndex) =>
@@ -1773,6 +2000,7 @@ function NarrationAudition({
         {
           method: "POST",
           body: JSON.stringify({
+            profile_id: profile?.id,
             variants: variants.map((variant) => ({ ...variant, voice_id: voiceId.trim() })),
           }),
         },
@@ -1818,7 +2046,7 @@ function NarrationAudition({
 
   return (
     <section className="narration-audition">
-      <div className="fragment-subhead">情感旁白试听</div>
+      <div className="fragment-subhead">情感旁白试听 · {profile?.display_name || "默认音色"}</div>
       <p>在这里配置音色 ID、情绪、语速和音调。三个版本使用同一文字稿，批准前不会改变线上音频。</p>
       <div className="narration-provider-line">
         <span>服务：{provider || "加载中"}</span>

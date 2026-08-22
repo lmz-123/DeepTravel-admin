@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -32,6 +32,9 @@ class NarrationPreview(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     fragment_id: Mapped[str] = mapped_column(String(36), ForeignKey("story_fragments.id"), index=True)
+    profile_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("narration_voice_profiles.id"), nullable=True, index=True
+    )
     transcript_hash: Mapped[str] = mapped_column(String(64), index=True)
     provider: Mapped[str] = mapped_column(String(40))
     model: Mapped[str] = mapped_column(String(80))
@@ -205,6 +208,56 @@ class StoryFragment(Base):
     raises_question: Mapped[str] = mapped_column(Text)
     authenticity_label: Mapped[str] = mapped_column(String(80), default="interpretive")
     review_state: Mapped[str] = mapped_column(String(40), default="in_review")
+
+
+class NarrationVoiceProfile(Base):
+    __tablename__ = "narration_voice_profiles"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    slug: Mapped[str] = mapped_column(String(80), unique=True, index=True)
+    display_name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str] = mapped_column(String(500), default="")
+    provider: Mapped[str] = mapped_column(String(40))
+    model: Mapped[str] = mapped_column(String(80))
+    voice_id: Mapped[str] = mapped_column(String(120))
+    emotion: Mapped[str] = mapped_column(String(40), default="neutral")
+    speed: Mapped[float] = mapped_column(Float, default=1.0)
+    pitch: Mapped[int] = mapped_column(Integer, default=0)
+    preview_media_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    display_order: Mapped[int] = mapped_column(Integer, default=0)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class FragmentNarrationTrack(Base):
+    __tablename__ = "fragment_narration_tracks"
+    __table_args__ = (
+        UniqueConstraint(
+            "fragment_id",
+            "profile_id",
+            "transcript_hash",
+            "script_version",
+            name="uq_fragment_voice_script",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    fragment_id: Mapped[str] = mapped_column(String(36), ForeignKey("story_fragments.id"), index=True)
+    profile_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("narration_voice_profiles.id"), index=True
+    )
+    transcript_hash: Mapped[str] = mapped_column(String(64), index=True)
+    script_version: Mapped[str] = mapped_column(String(40))
+    media_path: Mapped[str] = mapped_column(String(500))
+    mime_type: Mapped[str] = mapped_column(String(80), default="audio/mpeg")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    checksum_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    generation_metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class FragmentClaim(Base):

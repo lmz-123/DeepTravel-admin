@@ -58,6 +58,13 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.match(admin, /音色 Voice ID/);
   assert.match(admin, /语速/);
   assert.match(admin, /音调/);
+  assert.match(admin, /\/narration\/profiles/);
+  assert.match(admin, /narration\/coverage\?profile_id=/);
+  assert.match(admin, /profile_id: profile\?\.id/);
+  assert.match(admin, /新建音色/);
+  assert.match(admin, /当前文字稿覆盖/);
+  assert.match(admin, /发布音色/);
+  assert.match(admin, /设为默认/);
   assert.match(admin, /最终因果链/);
   assert.match(admin, /史实来源与主张/);
   assert.match(logConsole, /Authorization.*Bearer/);

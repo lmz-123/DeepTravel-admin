@@ -28,12 +28,14 @@ from models import (
     ClaimSource,
     FragmentClaim,
     FragmentDependency,
+    FragmentNarrationTrack,
     HistoricalClaim,
     HistoricalSource,
     Journey,
     JourneyAnswer,
     MediaAsset,
     NarrationPreview,
+    NarrationVoiceProfile,
     PhotoMission,
     Route,
     Stop,
@@ -902,6 +904,7 @@ def narration_preview_dict(item: NarrationPreview) -> dict[str, Any]:
     return {
         "id": item.id,
         "fragment_id": item.fragment_id,
+        "profile_id": item.profile_id,
         "transcript_hash": item.transcript_hash,
         "provider": item.provider,
         "model": item.model,
@@ -926,6 +929,300 @@ def narration_default_variants() -> list[dict[str, Any]]:
         {"label": "温和导览", "emotion": "neutral", "speed": 1.0, "pitch": 0},
         {"label": "故事张力", "emotion": "happy", "speed": 0.96, "pitch": 1},
     ]
+
+
+DEFAULT_NARRATION_PROFILE_ID = "default-narration-voice"
+
+
+def narration_profile_dict(item: NarrationVoiceProfile) -> dict[str, Any]:
+    return {
+        "id": item.id,
+        "slug": item.slug,
+        "display_name": item.display_name,
+        "description": item.description,
+        "provider": item.provider,
+        "model": item.model,
+        "voice_id": item.voice_id,
+        "emotion": item.emotion,
+        "speed": item.speed,
+        "pitch": item.pitch,
+        "preview_media_path": item.preview_media_path,
+        "display_order": item.display_order,
+        "status": item.status,
+        "is_default": item.is_default,
+        "published_at": iso(item.published_at),
+        "updated_at": iso(item.updated_at),
+    }
+
+
+def ensure_default_narration_profile(db: Session) -> NarrationVoiceProfile:
+    profile = db.get(NarrationVoiceProfile, DEFAULT_NARRATION_PROFILE_ID)
+    now = datetime.now(UTC)
+    if profile is None:
+        profile = NarrationVoiceProfile(
+            id=DEFAULT_NARRATION_PROFILE_ID,
+            slug="default",
+            display_name="原声导览",
+            description="路线编辑审核通过的默认旁白",
+            provider="legacy",
+            model="approved-audio",
+            voice_id=settings.minimax_voice_id,
+            emotion="neutral",
+            speed=1.0,
+            pitch=0,
+            display_order=0,
+            status="published",
+            is_default=True,
+            created_at=now,
+            updated_at=now,
+            published_at=now,
+        )
+        db.add(profile)
+        db.flush()
+    fragments = list(db.scalars(select(StoryFragment)))
+    for fragment in fragments:
+        transcript_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
+        track = db.scalar(
+            select(FragmentNarrationTrack).where(
+                FragmentNarrationTrack.fragment_id == fragment.id,
+                FragmentNarrationTrack.profile_id == profile.id,
+                FragmentNarrationTrack.transcript_hash == transcript_hash,
+                FragmentNarrationTrack.script_version == fragment.script_version,
+            )
+        )
+        if track is None and fragment.audio_path:
+            db.add(
+                FragmentNarrationTrack(
+                    id=str(uuid4()),
+                    fragment_id=fragment.id,
+                    profile_id=profile.id,
+                    transcript_hash=transcript_hash,
+                    script_version=fragment.script_version,
+                    media_path=fragment.audio_path,
+                    mime_type=fragment.audio_mime_type,
+                    size_bytes=fragment.audio_size_bytes,
+                    generation_metadata_json={"backfilled": True},
+                    approved_at=now,
+                    published_at=now,
+                )
+            )
+    db.flush()
+    return profile
+
+
+def narration_profile_coverage(
+    db: Session, route_id: str, profile_id: str
+) -> dict[str, Any]:
+    route = db.get(Route, route_id)
+    profile = db.get(NarrationVoiceProfile, profile_id)
+    if route is None or profile is None:
+        raise HTTPException(404, "路线或音色不存在")
+    arc = db.scalar(select(StoryArc).where(StoryArc.route_id == route_id))
+    fragments = (
+        list(
+            db.scalars(
+                select(StoryFragment)
+                .where(StoryFragment.arc_id == arc.id)
+                .order_by(StoryFragment.position)
+            )
+        )
+        if arc
+        else []
+    )
+    rows = list(
+        db.scalars(
+            select(FragmentNarrationTrack).where(
+                FragmentNarrationTrack.profile_id == profile_id,
+                FragmentNarrationTrack.fragment_id.in_([item.id for item in fragments]),
+            )
+        )
+    ) if fragments else []
+    by_fragment: dict[str, list[FragmentNarrationTrack]] = {}
+    for row in rows:
+        by_fragment.setdefault(row.fragment_id, []).append(row)
+    missing: list[dict[str, str]] = []
+    stale: list[dict[str, str]] = []
+    complete: list[str] = []
+    for fragment in fragments:
+        expected_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
+        current = next(
+            (
+                row
+                for row in by_fragment.get(fragment.id, [])
+                if row.transcript_hash == expected_hash
+                and row.script_version == fragment.script_version
+            ),
+            None,
+        )
+        if current is not None:
+            complete.append(fragment.id)
+        elif by_fragment.get(fragment.id):
+            stale.append({"id": fragment.id, "title": fragment.title})
+        else:
+            missing.append({"id": fragment.id, "title": fragment.title})
+    return {
+        "route_id": route_id,
+        "profile_id": profile_id,
+        "total": len(fragments),
+        "complete_count": len(complete),
+        "complete_fragment_ids": complete,
+        "missing": missing,
+        "stale": stale,
+        "ready": bool(fragments) and not missing and not stale,
+    }
+
+
+@app.get("/api/admin/narration/profiles")
+def list_narration_profiles(_: Auth, db: Db):
+    ensure_default_narration_profile(db)
+    db.commit()
+    rows = list(
+        db.scalars(
+            select(NarrationVoiceProfile).order_by(
+                NarrationVoiceProfile.display_order,
+                NarrationVoiceProfile.display_name,
+            )
+        )
+    )
+    return [narration_profile_dict(item) for item in rows]
+
+
+@app.post("/api/admin/narration/profiles", status_code=201)
+def create_narration_profile(payload: dict[str, Any], _: Auth, db: Db):
+    slug = str(payload.get("slug") or "").strip().lower()
+    name = str(payload.get("display_name") or "").strip()
+    voice_id = str(payload.get("voice_id") or "").strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,78}", slug) or not name or not voice_id:
+        raise HTTPException(422, "slug、显示名称和 Voice ID 格式不正确")
+    if db.scalar(select(NarrationVoiceProfile).where(NarrationVoiceProfile.slug == slug)):
+        raise HTTPException(409, "音色 slug 已存在")
+    now = datetime.now(UTC)
+    item = NarrationVoiceProfile(
+        id=str(uuid4()),
+        slug=slug,
+        display_name=name,
+        description=str(payload.get("description") or "").strip(),
+        provider=str(payload.get("provider") or narration_synthesizer.provider),
+        model=str(payload.get("model") or narration_synthesizer.model),
+        voice_id=voice_id,
+        emotion=str(payload.get("emotion") or "neutral"),
+        speed=min(max(float(payload.get("speed", 1.0)), 0.5), 2.0),
+        pitch=min(max(int(payload.get("pitch", 0)), -12), 12),
+        display_order=int(payload.get("display_order", 10)),
+        status="draft",
+        is_default=False,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(item)
+    db.commit()
+    return narration_profile_dict(item)
+
+
+@app.put("/api/admin/narration/profiles/{profile_id}")
+def update_narration_profile(
+    profile_id: str, payload: dict[str, Any], _: Auth, db: Db
+):
+    item = db.get(NarrationVoiceProfile, profile_id)
+    if item is None:
+        raise HTTPException(404, "音色不存在")
+    for key in ("display_name", "description", "provider", "model", "voice_id", "emotion"):
+        if key in payload:
+            setattr(item, key, str(payload[key]).strip())
+    if "speed" in payload:
+        item.speed = min(max(float(payload["speed"]), 0.5), 2.0)
+    if "pitch" in payload:
+        item.pitch = min(max(int(payload["pitch"]), -12), 12)
+    if "display_order" in payload:
+        item.display_order = int(payload["display_order"])
+    if "preview_media_path" in payload:
+        item.preview_media_path = str(payload["preview_media_path"] or "").strip() or None
+    if item.status == "published" and any(
+        key in payload for key in ("provider", "model", "voice_id", "emotion", "speed", "pitch")
+    ):
+        item.status = "draft"
+        item.published_at = None
+    item.updated_at = datetime.now(UTC)
+    db.commit()
+    return narration_profile_dict(item)
+
+
+@app.get("/api/admin/routes/{route_id}/narration/coverage")
+def get_narration_coverage(route_id: str, profile_id: str, _: Auth, db: Db):
+    ensure_default_narration_profile(db)
+    return narration_profile_coverage(db, route_id, profile_id)
+
+
+@app.post("/api/admin/narration/profiles/{profile_id}/publish")
+def publish_narration_profile(
+    profile_id: str, payload: dict[str, Any], _: Auth, db: Db
+):
+    item = db.get(NarrationVoiceProfile, profile_id)
+    route_id = str(payload.get("route_id") or "")
+    if item is None:
+        raise HTTPException(404, "音色不存在")
+    coverage = narration_profile_coverage(db, route_id, profile_id)
+    if not coverage["ready"]:
+        raise HTTPException(409, {"message": "音色尚未覆盖整条路线", "coverage": coverage})
+    now = datetime.now(UTC)
+    item.status = "published"
+    item.published_at = now
+    item.updated_at = now
+    for fragment_id in coverage["complete_fragment_ids"]:
+        fragment = db.get(StoryFragment, fragment_id)
+        transcript_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
+        track = db.scalar(
+            select(FragmentNarrationTrack).where(
+                FragmentNarrationTrack.fragment_id == fragment_id,
+                FragmentNarrationTrack.profile_id == profile_id,
+                FragmentNarrationTrack.transcript_hash == transcript_hash,
+                FragmentNarrationTrack.script_version == fragment.script_version,
+            )
+        )
+        track.published_at = now
+    db.commit()
+    return {"profile": narration_profile_dict(item), "coverage": coverage}
+
+
+@app.post("/api/admin/narration/profiles/{profile_id}/archive")
+def archive_narration_profile(profile_id: str, _: Auth, db: Db):
+    item = db.get(NarrationVoiceProfile, profile_id)
+    if item is None:
+        raise HTTPException(404, "音色不存在")
+    if item.is_default:
+        raise HTTPException(409, "默认音色不能归档，请先设置另一个默认音色")
+    item.status = "archived"
+    item.updated_at = datetime.now(UTC)
+    db.commit()
+    return narration_profile_dict(item)
+
+
+@app.post("/api/admin/narration/profiles/{profile_id}/set-default")
+def set_default_narration_profile(profile_id: str, _: Auth, db: Db):
+    item = db.get(NarrationVoiceProfile, profile_id)
+    if item is None or item.status != "published" or item.published_at is None:
+        raise HTTPException(409, "只有已发布音色可以设为默认")
+    now = datetime.now(UTC)
+    for profile in db.scalars(select(NarrationVoiceProfile)):
+        profile.is_default = profile.id == profile_id
+        profile.updated_at = now
+    tracks = list(
+        db.scalars(
+            select(FragmentNarrationTrack).where(
+                FragmentNarrationTrack.profile_id == profile_id,
+                FragmentNarrationTrack.published_at.is_not(None),
+            )
+        )
+    )
+    for track in tracks:
+        fragment = db.get(StoryFragment, track.fragment_id)
+        expected_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
+        if track.transcript_hash == expected_hash and track.script_version == fragment.script_version:
+            fragment.audio_path = track.media_path
+            fragment.audio_mime_type = track.mime_type
+            fragment.audio_size_bytes = track.size_bytes
+    db.commit()
+    return narration_profile_dict(item)
 
 
 @app.get("/api/admin/narration/config")
@@ -955,6 +1252,11 @@ def generate_narration_previews(fragment_id: str, payload: dict[str, Any], _: Au
     transcript = fragment.narration_script.strip()
     if not transcript:
         raise HTTPException(422, "旁白文字稿不能为空")
+    default_profile = ensure_default_narration_profile(db)
+    profile_id = str(payload.get("profile_id") or default_profile.id)
+    profile = db.get(NarrationVoiceProfile, profile_id)
+    if profile is None or profile.status == "archived":
+        raise HTTPException(422, "请选择可编辑的音色档案")
     variants = payload.get("variants") or narration_default_variants()
     if not isinstance(variants, list) or not 3 <= len(variants) <= 5:
         raise HTTPException(422, "一次需要生成 3 到 5 个试听版本")
@@ -965,13 +1267,14 @@ def generate_narration_previews(fragment_id: str, payload: dict[str, Any], _: Au
     for raw in variants:
         variant = dict(raw)
         preview_id = str(uuid4())
-        voice_id = str(variant.get("voice_id") or settings.minimax_voice_id)
-        emotion = str(variant.get("emotion") or "neutral")
-        speed = min(max(float(variant.get("speed", 1.0)), 0.5), 2.0)
-        pitch = min(max(int(variant.get("pitch", 0)), -12), 12)
+        voice_id = str(variant.get("voice_id") or profile.voice_id)
+        emotion = str(variant.get("emotion") or profile.emotion)
+        speed = min(max(float(variant.get("speed", profile.speed)), 0.5), 2.0)
+        pitch = min(max(int(variant.get("pitch", profile.pitch)), -12), 12)
         preview = NarrationPreview(
             id=preview_id,
             fragment_id=fragment.id,
+            profile_id=profile.id,
             transcript_hash=transcript_hash,
             provider=narration_synthesizer.provider,
             model=narration_synthesizer.model,
@@ -1034,10 +1337,23 @@ def approve_narration_preview(preview_id: str, _: Auth, db: Db):
     transcript_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
     if transcript_hash != preview.transcript_hash:
         raise HTTPException(409, "文字稿已变化，请重新生成试听版本")
+    profile = db.get(
+        NarrationVoiceProfile,
+        preview.profile_id or DEFAULT_NARRATION_PROFILE_ID,
+    )
+    if profile is None or profile.status == "archived":
+        raise HTTPException(409, "试听对应的音色档案不存在或已归档")
     with private_object_storage.open(preview.object_key) as source:
         audio = source.read()
     version = re.sub(r"[^a-zA-Z0-9._-]", "-", fragment.script_version) or "v1"
-    object_key = f"public/narration/{fragment.id}/{transcript_hash[:16]}-{version}.mp3"
+    settings_hash = hashlib.sha256(
+        f"{preview.voice_id}|{preview.emotion}|{preview.speed}|{preview.pitch}".encode()
+    ).hexdigest()[:12]
+    profile_slug = re.sub(r"[^a-z0-9-]", "-", profile.slug.lower()) or "voice"
+    object_key = (
+        f"public/narration/{fragment.id}/{profile_slug}/"
+        f"{transcript_hash[:16]}-{version}-{settings_hash}.mp3"
+    )
     uploaded = False
     try:
         if not public_object_storage.exists(object_key):
@@ -1048,7 +1364,7 @@ def approve_narration_preview(preview_id: str, _: Auth, db: Db):
         if asset is None:
             now = datetime.now(UTC)
             asset = MediaAsset(
-                key=f"narration-{fragment.id}-{transcript_hash[:12]}",
+                key=f"narration-{fragment.id[:36]}-{profile.slug[:24]}-{settings_hash}",
                 storage_path=object_key,
                 mime_type="audio/mpeg",
                 storage_provider=public_object_storage.provider,
@@ -1062,18 +1378,75 @@ def approve_narration_preview(preview_id: str, _: Auth, db: Db):
                 updated_at=now,
             )
             db.add(asset)
-        fragment.audio_path = object_key
-        fragment.audio_mime_type = "audio/mpeg"
-        fragment.audio_size_bytes = len(audio)
+        now = datetime.now(UTC)
+        track = db.scalar(
+            select(FragmentNarrationTrack).where(
+                FragmentNarrationTrack.fragment_id == fragment.id,
+                FragmentNarrationTrack.profile_id == profile.id,
+                FragmentNarrationTrack.transcript_hash == transcript_hash,
+                FragmentNarrationTrack.script_version == fragment.script_version,
+            )
+        )
+        if track is None:
+            track = FragmentNarrationTrack(
+                id=str(uuid4()),
+                fragment_id=fragment.id,
+                profile_id=profile.id,
+                transcript_hash=transcript_hash,
+                script_version=fragment.script_version,
+                media_path=object_key,
+                mime_type="audio/mpeg",
+                size_bytes=len(audio),
+                checksum_sha256=hashlib.sha256(audio).hexdigest(),
+                generation_metadata_json={},
+                approved_at=now,
+                published_at=now if profile.status == "published" else None,
+            )
+            db.add(track)
+        track.media_path = object_key
+        track.mime_type = "audio/mpeg"
+        track.size_bytes = len(audio)
+        track.checksum_sha256 = hashlib.sha256(audio).hexdigest()
+        track.generation_metadata_json = {
+            "preview_id": preview.id,
+            "provider": preview.provider,
+            "model": preview.model,
+            "voice_id": preview.voice_id,
+            "emotion": preview.emotion,
+            "speed": preview.speed,
+            "pitch": preview.pitch,
+        }
+        track.approved_at = now
+        track.published_at = now if profile.status == "published" else None
+        if profile.preview_media_path is None:
+            profile.preview_media_path = object_key
+        if profile.is_default:
+            fragment.audio_path = object_key
+            fragment.audio_mime_type = "audio/mpeg"
+            fragment.audio_size_bytes = len(audio)
         preview.status = "approved"
-        preview.approved_at = datetime.now(UTC)
+        preview.approved_at = now
         db.commit()
     except Exception:
         db.rollback()
         if uploaded:
             public_object_storage.delete(object_key)
         raise
-    return {"preview": narration_preview_dict(preview), "asset": {"key": asset.key, "storage_path": asset.storage_path, "canonical_url": asset.canonical_url}}
+    return {
+        "preview": narration_preview_dict(preview),
+        "profile": narration_profile_dict(profile),
+        "track": {
+            "id": track.id,
+            "fragment_id": track.fragment_id,
+            "profile_id": track.profile_id,
+            "media_path": track.media_path,
+        },
+        "asset": {
+            "key": asset.key,
+            "storage_path": asset.storage_path,
+            "canonical_url": asset.canonical_url,
+        },
+    }
 
 
 @app.post("/api/admin/narration/previews/cleanup")

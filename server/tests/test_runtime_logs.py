@@ -22,7 +22,15 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 import main  # noqa: E402
-from models import Base, ClientRuntimeLog, Journey, MediaAsset, StoryFragment  # noqa: E402
+from models import (  # noqa: E402
+    Base,
+    ClientRuntimeLog,
+    FragmentNarrationTrack,
+    Journey,
+    MediaAsset,
+    NarrationVoiceProfile,
+    StoryFragment,
+)
 from runtime_logs.docker_source import DockerFrameDecoder, DockerLogSource, parse_docker_line  # noqa: E402
 from runtime_logs.normalization import (  # noqa: E402
     NormalizationLimits,
@@ -438,6 +446,156 @@ class FragmentedContentApiTests(unittest.TestCase):
             headers=self.headers,
         )
         self.assertEqual(rejected.status_code, 409, rejected.text)
+
+    def test_voice_profile_requires_complete_coverage_and_never_overwrites_default(self):
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
+        )
+        self.assertEqual(imported.status_code, 201, imported.text)
+        original_audio = imported.json()["graph"]["fragments"][0]["audio_path"] if "graph" in imported.json() else "audio/one.m4a"
+
+        created = self.client.post(
+            "/api/admin/narration/profiles",
+            headers=self.headers,
+            json={
+                "slug": "warm-storyteller",
+                "display_name": "温柔讲述者",
+                "description": "温暖、克制",
+                "voice_id": "voice-warm",
+                "display_order": 12,
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        profile = created.json()
+        self.assertEqual(profile["status"], "draft")
+
+        coverage = self.client.get(
+            f"/api/admin/routes/route-test/narration/coverage?profile_id={profile['id']}",
+            headers=self.headers,
+        ).json()
+        self.assertFalse(coverage["ready"])
+        self.assertEqual([item["id"] for item in coverage["missing"]], ["fragment-one", "fragment-two"])
+        rejected = self.client.post(
+            f"/api/admin/narration/profiles/{profile['id']}/publish",
+            headers=self.headers,
+            json={"route_id": "route-test"},
+        )
+        self.assertEqual(rejected.status_code, 409, rejected.text)
+
+        approved_paths = []
+        for fragment_id in ("fragment-one", "fragment-two"):
+            generated = self.client.post(
+                f"/api/admin/fragments/{fragment_id}/narration/previews",
+                headers=self.headers,
+                json={"profile_id": profile["id"]},
+            )
+            self.assertEqual(generated.status_code, 201, generated.text)
+            preview = generated.json()["previews"][0]
+            self.assertEqual(preview["profile_id"], profile["id"])
+            approved = self.client.post(
+                f"/api/admin/narration/previews/{preview['id']}/approve",
+                headers=self.headers,
+            )
+            self.assertEqual(approved.status_code, 200, approved.text)
+            approved_paths.append(approved.json()["track"]["media_path"])
+
+        self.assertEqual(len(set(approved_paths)), 2)
+        self.assertTrue(all("/warm-storyteller/" in path for path in approved_paths))
+        graph = self.client.get(
+            "/api/admin/routes/route-test/content", headers=self.headers
+        ).json()
+        self.assertEqual(graph["fragments"][0]["audio_path"], original_audio)
+
+        ready = self.client.get(
+            f"/api/admin/routes/route-test/narration/coverage?profile_id={profile['id']}",
+            headers=self.headers,
+        ).json()
+        self.assertTrue(ready["ready"])
+        published = self.client.post(
+            f"/api/admin/narration/profiles/{profile['id']}/publish",
+            headers=self.headers,
+            json={"route_id": "route-test"},
+        )
+        self.assertEqual(published.status_code, 200, published.text)
+        with main.SessionLocal() as db:
+            rows = list(db.query(FragmentNarrationTrack).filter_by(profile_id=profile["id"]))
+            self.assertEqual(len(rows), 2)
+            self.assertTrue(all(row.published_at is not None for row in rows))
+            self.assertTrue(db.get(NarrationVoiceProfile, profile["id"]) is not None)
+
+        made_default = self.client.post(
+            f"/api/admin/narration/profiles/{profile['id']}/set-default",
+            headers=self.headers,
+        )
+        self.assertEqual(made_default.status_code, 200, made_default.text)
+        changed = self.client.get(
+            "/api/admin/routes/route-test/content", headers=self.headers
+        ).json()
+        self.assertEqual(changed["fragments"][0]["audio_path"], approved_paths[0])
+
+        with main.SessionLocal() as db:
+            fragment = db.get(StoryFragment, "fragment-two")
+            fragment.narration_script = "文字稿发生变化。"
+            fragment.transcript = fragment.narration_script
+            db.commit()
+        stale = self.client.get(
+            f"/api/admin/routes/route-test/narration/coverage?profile_id={profile['id']}",
+            headers=self.headers,
+        ).json()
+        self.assertFalse(stale["ready"])
+        self.assertEqual([item["id"] for item in stale["stale"]], ["fragment-two"])
+
+    def test_two_non_default_profiles_generate_distinct_complete_route_tracks(self):
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
+        )
+        self.assertEqual(imported.status_code, 201, imported.text)
+        original = self.client.get(
+            "/api/admin/routes/route-test/content", headers=self.headers
+        ).json()["fragments"][0]["audio_path"]
+        all_paths = []
+        for slug, name, voice_id in (
+            ("calm-walker", "沉静同行者", "voice-calm"),
+            ("vivid-storyteller", "生动讲述者", "voice-vivid"),
+        ):
+            created = self.client.post(
+                "/api/admin/narration/profiles",
+                headers=self.headers,
+                json={"slug": slug, "display_name": name, "voice_id": voice_id},
+            )
+            self.assertEqual(created.status_code, 201, created.text)
+            profile_id = created.json()["id"]
+            for fragment_id in ("fragment-one", "fragment-two"):
+                generated = self.client.post(
+                    f"/api/admin/fragments/{fragment_id}/narration/previews",
+                    headers=self.headers,
+                    json={"profile_id": profile_id},
+                )
+                self.assertEqual(generated.status_code, 201, generated.text)
+                approved = self.client.post(
+                    f"/api/admin/narration/previews/{generated.json()['previews'][0]['id']}/approve",
+                    headers=self.headers,
+                )
+                self.assertEqual(approved.status_code, 200, approved.text)
+                all_paths.append(approved.json()["track"]["media_path"])
+            published = self.client.post(
+                f"/api/admin/narration/profiles/{profile_id}/publish",
+                headers=self.headers,
+                json={"route_id": "route-test"},
+            )
+            self.assertEqual(published.status_code, 200, published.text)
+
+        self.assertEqual(len(all_paths), len(set(all_paths)))
+        self.assertTrue(any("/calm-walker/" in item for item in all_paths))
+        self.assertTrue(any("/vivid-storyteller/" in item for item in all_paths))
+        unchanged = self.client.get(
+            "/api/admin/routes/route-test/content", headers=self.headers
+        ).json()["fragments"][0]["audio_path"]
+        self.assertEqual(unchanged, original)
 
     def test_same_checksum_assets_share_object_without_unsafe_deletion(self):
         first = self.client.post(
