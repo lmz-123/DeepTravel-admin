@@ -49,6 +49,8 @@ class Route(Base):
     is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
     content_status: Mapped[str] = mapped_column(String(40), default="draft")
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    managed_package_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
+    managed_package_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
 
 class Stop(Base):
@@ -95,6 +97,143 @@ class JourneyAnswer(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     stop_id: Mapped[str] = mapped_column(String(36), index=True)
+
+
+class HistoricalSource(Base):
+    __tablename__ = "historical_sources"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    title: Mapped[str] = mapped_column(String(255))
+    publisher: Mapped[str] = mapped_column(String(160))
+    url: Mapped[str] = mapped_column(String(800))
+    source_type: Mapped[str] = mapped_column(String(40), default="government")
+    accessed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    review_state: Mapped[str] = mapped_column(String(40), default="in_review")
+    summary: Mapped[str] = mapped_column(Text)
+
+
+class HistoricalClaim(Base):
+    __tablename__ = "historical_claims"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    canonical_text: Mapped[str] = mapped_column(Text)
+    claim_kind: Mapped[str] = mapped_column(String(40))
+    certainty: Mapped[str] = mapped_column(String(40), default="documented")
+    review_state: Mapped[str] = mapped_column(String(40), default="in_review")
+    boundary_note: Mapped[str] = mapped_column(Text, default="")
+    supersedes_claim_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    reviewed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class ClaimSource(Base):
+    __tablename__ = "claim_sources"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    claim_id: Mapped[str] = mapped_column(String(36), index=True)
+    source_id: Mapped[str] = mapped_column(String(36), index=True)
+    support_note: Mapped[str] = mapped_column(Text)
+
+
+class StoryArc(Base):
+    __tablename__ = "story_arcs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    route_id: Mapped[str] = mapped_column(String(36), unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(255))
+    central_question: Mapped[str] = mapped_column(Text)
+    complete_story: Mapped[str] = mapped_column(Text)
+    causal_model_json: Mapped[list[dict | str]] = mapped_column(JSON)
+    pronunciation_notes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    script_version: Mapped[str] = mapped_column(String(40))
+    review_state: Mapped[str] = mapped_column(String(40), default="in_review")
+    field_audit_state: Mapped[str] = mapped_column(String(40), default="required")
+    reviewed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    source_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    publication_decision: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class StoryFragment(Base):
+    __tablename__ = "story_fragments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    arc_id: Mapped[str] = mapped_column(String(36), index=True)
+    stop_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    position: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(255))
+    safe_preview: Mapped[str] = mapped_column(Text)
+    narration_script: Mapped[str] = mapped_column(Text)
+    transcript: Mapped[str] = mapped_column(Text)
+    audio_path: Mapped[str] = mapped_column(String(500))
+    audio_mime_type: Mapped[str] = mapped_column(String(80), default="audio/mpeg")
+    audio_size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    script_version: Mapped[str] = mapped_column(String(40))
+    interaction_type: Mapped[str] = mapped_column(String(40))
+    completion_threshold: Mapped[float] = mapped_column(Float, default=0.9)
+    key_claim: Mapped[str] = mapped_column(Text)
+    answers_question: Mapped[str] = mapped_column(Text)
+    raises_question: Mapped[str] = mapped_column(Text)
+    authenticity_label: Mapped[str] = mapped_column(String(80), default="interpretive")
+    review_state: Mapped[str] = mapped_column(String(40), default="in_review")
+
+
+class FragmentClaim(Base):
+    __tablename__ = "fragment_claims"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fragment_id: Mapped[str] = mapped_column(String(36), index=True)
+    claim_id: Mapped[str] = mapped_column(String(36), index=True)
+
+
+class FragmentDependency(Base):
+    __tablename__ = "fragment_dependencies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    fragment_id: Mapped[str] = mapped_column(String(36), index=True)
+    required_fragment_id: Mapped[str] = mapped_column(String(36), index=True)
+
+
+class TriggerRegion(Base):
+    __tablename__ = "trigger_regions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    fragment_id: Mapped[str] = mapped_column(String(36), unique=True)
+    latitude: Mapped[float] = mapped_column(Float)
+    longitude: Mapped[float] = mapped_column(Float)
+    entry_radius_m: Mapped[int] = mapped_column(Integer, default=60)
+    exit_radius_m: Mapped[int] = mapped_column(Integer, default=90)
+    max_accuracy_m: Mapped[int] = mapped_column(Integer, default=50)
+    qualifying_samples: Mapped[int] = mapped_column(Integer, default=2)
+    sample_window_seconds: Mapped[int] = mapped_column(Integer, default=15)
+    cooldown_seconds: Mapped[int] = mapped_column(Integer, default=120)
+    audit_state: Mapped[str] = mapped_column(String(40), default="in_review")
+    coordinate_system: Mapped[str] = mapped_column(String(20), default="WGS84")
+    source_coordinate_system: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    coordinate_source: Mapped[str | None] = mapped_column(Text, nullable=True)
+    field_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class PhotoMission(Base):
+    __tablename__ = "photo_missions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    fragment_id: Mapped[str] = mapped_column(String(36), unique=True)
+    prompt: Mapped[str] = mapped_column(Text)
+    field_subject: Mapped[str] = mapped_column(Text)
+    safety_copy: Mapped[str] = mapped_column(Text)
+    accessibility_alternative: Mapped[str] = mapped_column(Text)
+    authenticity_label: Mapped[str] = mapped_column(String(80), default="interpretive")
+    required: Mapped[bool] = mapped_column(Boolean, default=True)
+    audit_state: Mapped[str] = mapped_column(String(40), default="in_review")
+
+
+class JourneyFragment(Base):
+    __tablename__ = "journey_fragments"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    journey_id: Mapped[str] = mapped_column(String(36), index=True)
+    fragment_id: Mapped[str] = mapped_column(String(36), index=True)
 
 
 class ClientRuntimeLog(Base):

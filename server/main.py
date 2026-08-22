@@ -21,7 +21,25 @@ from sqlalchemy import create_engine, delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from models import Challenge, City, Journey, JourneyAnswer, MediaAsset, Route, Stop
+from content_graph import validate_graph
+from models import (
+    Challenge,
+    City,
+    ClaimSource,
+    FragmentClaim,
+    FragmentDependency,
+    HistoricalClaim,
+    HistoricalSource,
+    Journey,
+    JourneyAnswer,
+    MediaAsset,
+    PhotoMission,
+    Route,
+    Stop,
+    StoryArc,
+    StoryFragment,
+    TriggerRegion,
+)
 from runtime_logs.docker_source import DockerLogSource
 from runtime_logs.normalization import NormalizationLimits, normalize_event, normalize_level
 from runtime_logs.storage import (
@@ -184,6 +202,8 @@ def route_dict(item: Route, city_name: str | None = None, stop_count: int = 0) -
         "is_featured": item.is_featured,
         "content_status": item.content_status,
         "published_at": iso(item.published_at),
+        "managed_package_id": item.managed_package_id,
+        "managed_package_version": item.managed_package_version,
         "stop_count": stop_count,
     }
 
@@ -463,7 +483,7 @@ def dashboard(_: Auth, db: Db):
     counts = {
         "cities": db.scalar(select(func.count()).select_from(City)) or 0,
         "routes": db.scalar(select(func.count()).select_from(Route)) or 0,
-        "published_routes": db.scalar(select(func.count()).select_from(Route).where(Route.content_status == "published")) or 0,
+        "published_routes": db.scalar(select(func.count()).select_from(Route).where(Route.published_at.is_not(None))) or 0,
         "stops": db.scalar(select(func.count()).select_from(Stop)) or 0,
         "challenges": db.scalar(select(func.count()).select_from(Challenge)) or 0,
         "media": db.scalar(select(func.count()).select_from(MediaAsset)) or 0,
@@ -546,8 +566,12 @@ def create_route(payload: RouteInput, _: Auth, db: Db):
     if not db.get(City, payload.city_id):
         raise HTTPException(400, "所选城市不存在")
     values = payload.model_dump()
-    if values["content_status"] == "published" and not values["published_at"]:
+    if values["content_status"] == "published":
+        values["content_status"] = "verified"
+    if values["content_status"] == "verified" and not values["published_at"]:
         values["published_at"] = datetime.now(UTC)
+    elif values["content_status"] != "verified":
+        values["published_at"] = None
     item = Route(id=str(uuid4()), **values)
     db.add(item)
     commit_or_conflict(db, "路线标识已存在")
@@ -559,9 +583,15 @@ def update_route(item_id: str, payload: RouteInput, _: Auth, db: Db):
     item = db.get(Route, item_id)
     if not item:
         raise HTTPException(404, "路线不存在")
+    if item.managed_package_id and _published_route_locked(db, item):
+        raise HTTPException(409, "published_route_locked")
     values = payload.model_dump()
-    if values["content_status"] == "published" and not values["published_at"]:
+    if values["content_status"] == "published":
+        values["content_status"] = "verified"
+    if values["content_status"] == "verified" and not values["published_at"]:
         values["published_at"] = item.published_at or datetime.now(UTC)
+    elif values["content_status"] != "verified":
+        values["published_at"] = None
     for key, value in values.items():
         setattr(item, key, value)
     commit_or_conflict(db, "路线标识或字段与现有内容冲突")
@@ -754,6 +784,7 @@ def delete_media(asset_key: str, _: Auth, db: Db):
         (db.scalar(select(func.count()).select_from(City).where(City.hero_image == item.storage_path)) or 0)
         + (db.scalar(select(func.count()).select_from(Route).where(Route.hero_image == item.storage_path)) or 0)
         + (db.scalar(select(func.count()).select_from(Stop).where(or_(Stop.image == item.storage_path, Stop.audio_url == item.storage_path))) or 0)
+        + (db.scalar(select(func.count()).select_from(StoryFragment).where(StoryFragment.audio_path == item.storage_path)) or 0)
     )
     if references:
         raise HTTPException(409, f"该资源正在被 {references} 处内容使用，不能删除")
@@ -811,8 +842,12 @@ def import_content(payload: dict[str, Any], _: Auth, db: Db):
             data = RouteInput.model_validate(raw)
             route_id = supplied_route_id or db.scalar(select(Route.id).where(Route.slug == data.slug)) or str(uuid4())
             values = data.model_dump()
-            if values["content_status"] == "published" and not values["published_at"]:
+            if values["content_status"] == "published":
+                values["content_status"] = "verified"
+            if values["content_status"] == "verified" and not values["published_at"]:
                 values["published_at"] = datetime.now(UTC)
+            elif values["content_status"] != "verified":
+                values["published_at"] = None
             upsert(db, Route, route_id, values)
             route_ids[data.slug] = route_id
             for nested in nested_stops:
@@ -861,3 +896,563 @@ def import_content(payload: dict[str, Any], _: Auth, db: Db):
         db.rollback()
         raise HTTPException(422, f"导入失败：{exc}") from exc
     return {"message": "内容已写入数据库", "imported": counts}
+
+
+def _media_catalog(db: Session) -> dict[str, str]:
+    return {item.storage_path: item.mime_type for item in db.scalars(select(MediaAsset))}
+
+
+def _published_route_locked(db: Session, route: Route) -> bool:
+    if route.published_at is None:
+        return False
+    return bool(
+        db.scalar(select(func.count()).select_from(Journey).where(Journey.route_id == route.id))
+    )
+
+
+def _route_content(db: Session, route: Route) -> dict[str, Any]:
+    arc = db.scalar(select(StoryArc).where(StoryArc.route_id == route.id))
+    if arc is None:
+        return {
+            "package_id": route.managed_package_id,
+            "package_version": route.managed_package_version,
+            "route": route_dict(route),
+            "story_arc": None,
+            "fragments": [],
+            "sources": [],
+            "claims": [],
+            "required_photo_mission_count": 0,
+        }
+    fragments = list(
+        db.scalars(
+            select(StoryFragment)
+            .where(StoryFragment.arc_id == arc.id)
+            .order_by(StoryFragment.position)
+        )
+    )
+    fragment_ids = [item.id for item in fragments]
+    stops = {
+        item.id: item
+        for item in db.scalars(select(Stop).where(Stop.id.in_([x.stop_id for x in fragments if x.stop_id])))
+    }
+    regions = {
+        item.fragment_id: item
+        for item in db.scalars(
+            select(TriggerRegion).where(TriggerRegion.fragment_id.in_(fragment_ids))
+        )
+    }
+    missions = {
+        item.fragment_id: item
+        for item in db.scalars(
+            select(PhotoMission).where(PhotoMission.fragment_id.in_(fragment_ids))
+        )
+    }
+    dependency_map: dict[str, list[str]] = {}
+    for row in db.scalars(
+        select(FragmentDependency).where(FragmentDependency.fragment_id.in_(fragment_ids))
+    ):
+        dependency_map.setdefault(row.fragment_id, []).append(row.required_fragment_id)
+    claim_map: dict[str, list[str]] = {}
+    for row in db.scalars(select(FragmentClaim).where(FragmentClaim.fragment_id.in_(fragment_ids))):
+        claim_map.setdefault(row.fragment_id, []).append(row.claim_id)
+    route_claim_ids = sorted({value for values in claim_map.values() for value in values})
+    claims = list(
+        db.scalars(select(HistoricalClaim).where(HistoricalClaim.id.in_(route_claim_ids)))
+    )
+    support_map: dict[str, list[ClaimSource]] = {}
+    support_rows = list(
+        db.scalars(select(ClaimSource).where(ClaimSource.claim_id.in_(route_claim_ids)))
+    )
+    for row in support_rows:
+        support_map.setdefault(row.claim_id, []).append(row)
+    source_ids = sorted({row.source_id for row in support_rows})
+    sources = list(
+        db.scalars(select(HistoricalSource).where(HistoricalSource.id.in_(source_ids)))
+    )
+
+    def stop_payload(stop: Stop | None) -> dict[str, Any] | None:
+        if stop is None:
+            return None
+        return {
+            "id": stop.id,
+            "title": stop.title,
+            "kicker": stop.kicker,
+            "address": stop.address,
+            "latitude": stop.latitude,
+            "longitude": stop.longitude,
+            "arrival_radius_m": stop.arrival_radius_m,
+            "story_title": stop.story_title,
+            "story_body": stop.story_body,
+            "audio_url": stop.audio_url,
+            "image": stop.image,
+            "insight": stop.insight,
+        }
+
+    fragment_payloads = []
+    for fragment in fragments:
+        region = regions.get(fragment.id)
+        mission = missions.get(fragment.id)
+        fragment_payloads.append(
+            {
+                "id": fragment.id,
+                "position": fragment.position,
+                "title": fragment.title,
+                "safe_preview": fragment.safe_preview,
+                "narration_script": fragment.narration_script,
+                "transcript": fragment.transcript,
+                "audio_path": fragment.audio_path,
+                "audio_mime_type": fragment.audio_mime_type,
+                "audio_size_bytes": fragment.audio_size_bytes,
+                "script_version": fragment.script_version,
+                "interaction_type": fragment.interaction_type,
+                "completion_threshold": fragment.completion_threshold,
+                "key_claim": fragment.key_claim,
+                "answers_question": fragment.answers_question,
+                "raises_question": fragment.raises_question,
+                "authenticity_label": fragment.authenticity_label,
+                "review_state": fragment.review_state,
+                "dependency_ids": dependency_map.get(fragment.id, []),
+                "claim_ids": claim_map.get(fragment.id, []),
+                "stop": stop_payload(stops.get(fragment.stop_id or "")),
+                "trigger_region": {
+                    "id": region.id,
+                    "latitude": region.latitude,
+                    "longitude": region.longitude,
+                    "entry_radius_m": region.entry_radius_m,
+                    "exit_radius_m": region.exit_radius_m,
+                    "max_accuracy_m": region.max_accuracy_m,
+                    "qualifying_samples": region.qualifying_samples,
+                    "sample_window_seconds": region.sample_window_seconds,
+                    "cooldown_seconds": region.cooldown_seconds,
+                    "audit_state": region.audit_state,
+                    "coordinate_system": region.coordinate_system,
+                    "source_coordinate_system": region.source_coordinate_system,
+                    "coordinate_source": region.coordinate_source,
+                    "field_notes": region.field_notes,
+                }
+                if region
+                else None,
+                "photo_mission": {
+                    "id": mission.id,
+                    "prompt": mission.prompt,
+                    "field_subject": mission.field_subject,
+                    "safety_copy": mission.safety_copy,
+                    "accessibility_alternative": mission.accessibility_alternative,
+                    "authenticity_label": mission.authenticity_label,
+                    "required": mission.required,
+                    "audit_state": mission.audit_state,
+                }
+                if mission
+                else None,
+            }
+        )
+    return {
+        "package_id": route.managed_package_id,
+        "package_version": route.managed_package_version,
+        "route": {
+            **route_dict(route),
+            "id": route.id,
+        },
+        "story_arc": {
+            "id": arc.id,
+            "title": arc.title,
+            "central_question": arc.central_question,
+            "complete_story": arc.complete_story,
+            "causal_model": arc.causal_model_json,
+            "pronunciation_notes": arc.pronunciation_notes_json,
+            "script_version": arc.script_version,
+            "review_state": arc.review_state,
+            "field_audit_state": arc.field_audit_state,
+            "reviewed_by": arc.reviewed_by,
+            "reviewed_at": iso(arc.reviewed_at),
+            "source_version": arc.source_version,
+            "publication_decision": arc.publication_decision,
+        },
+        "fragments": fragment_payloads,
+        "sources": [
+            {
+                "id": item.id,
+                "title": item.title,
+                "publisher": item.publisher,
+                "url": item.url,
+                "source_type": item.source_type,
+                "accessed_at": iso(item.accessed_at),
+                "review_state": item.review_state,
+                "summary": item.summary,
+            }
+            for item in sources
+        ],
+        "claims": [
+            {
+                "id": item.id,
+                "canonical_text": item.canonical_text,
+                "claim_kind": item.claim_kind,
+                "certainty": item.certainty,
+                "review_state": item.review_state,
+                "boundary_note": item.boundary_note,
+                "supersedes_claim_id": item.supersedes_claim_id,
+                "reviewed_by": item.reviewed_by,
+                "reviewed_at": iso(item.reviewed_at),
+                "source_ids": [row.source_id for row in support_map.get(item.id, [])],
+                "support_notes": {
+                    row.source_id: row.support_note for row in support_map.get(item.id, [])
+                },
+            }
+            for item in claims
+        ],
+        "required_photo_mission_count": sum(
+            1 for item in missions.values() if item.required
+        ),
+    }
+
+
+def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> None:
+    if _published_route_locked(db, route):
+        raise HTTPException(409, "published_route_locked")
+    route_data = dict(graph.get("route") or {})
+    for key in (
+        "slug",
+        "title",
+        "subtitle",
+        "description",
+        "duration_minutes",
+        "distance_km",
+        "difficulty",
+        "theme",
+        "hero_image",
+        "is_featured",
+    ):
+        if key in route_data:
+            setattr(route, key, route_data[key])
+    route.managed_package_id = str(graph.get("package_id") or route.managed_package_id or "") or None
+    route.managed_package_version = str(
+        graph.get("package_version") or route.managed_package_version or ""
+    ) or None
+    route.content_status = "draft"
+    route.published_at = None
+
+    old_arc = db.scalar(select(StoryArc).where(StoryArc.route_id == route.id))
+    old_fragment_ids: list[str] = []
+    if old_arc:
+        old_fragment_ids = list(
+            db.scalars(select(StoryFragment.id).where(StoryFragment.arc_id == old_arc.id))
+        )
+    if old_fragment_ids:
+        db.execute(delete(FragmentClaim).where(FragmentClaim.fragment_id.in_(old_fragment_ids)))
+        db.execute(
+            delete(FragmentDependency).where(
+                FragmentDependency.fragment_id.in_(old_fragment_ids)
+            )
+        )
+        db.execute(delete(TriggerRegion).where(TriggerRegion.fragment_id.in_(old_fragment_ids)))
+        db.execute(delete(PhotoMission).where(PhotoMission.fragment_id.in_(old_fragment_ids)))
+        db.execute(delete(StoryFragment).where(StoryFragment.id.in_(old_fragment_ids)))
+    if old_arc:
+        db.delete(old_arc)
+    stop_ids = list(db.scalars(select(Stop.id).where(Stop.route_id == route.id)))
+    if stop_ids:
+        db.execute(delete(Challenge).where(Challenge.stop_id.in_(stop_ids)))
+        db.execute(delete(Stop).where(Stop.id.in_(stop_ids)))
+    db.flush()
+
+    for raw in graph.get("sources") or []:
+        values = dict(raw)
+        identity = str(values.pop("id"))
+        values["accessed_at"] = _parse_datetime(values.get("accessed_at")) or datetime.now(UTC)
+        item = db.get(HistoricalSource, identity)
+        if item is None:
+            db.add(HistoricalSource(id=identity, **values))
+        else:
+            for key, value in values.items():
+                setattr(item, key, value)
+    for raw in graph.get("claims") or []:
+        values = dict(raw)
+        identity = str(values.pop("id"))
+        source_ids = list(map(str, values.pop("source_ids", [])))
+        support_notes = dict(values.pop("support_notes", {}))
+        values["reviewed_at"] = _parse_datetime(values.get("reviewed_at"))
+        item = db.get(HistoricalClaim, identity)
+        if item is None:
+            db.add(HistoricalClaim(id=identity, **values))
+        else:
+            for key, value in values.items():
+                setattr(item, key, value)
+        db.execute(delete(ClaimSource).where(ClaimSource.claim_id == identity))
+        for source_id in source_ids:
+            db.add(
+                ClaimSource(
+                    claim_id=identity,
+                    source_id=source_id,
+                    support_note=str(support_notes.get(source_id) or "支持该线索中的事实表述"),
+                )
+            )
+
+    arc_data = dict(graph.get("story_arc") or {})
+    arc_id = str(arc_data.pop("id"))
+    arc = StoryArc(
+        id=arc_id,
+        route_id=route.id,
+        title=str(arc_data.get("title") or ""),
+        central_question=str(arc_data.get("central_question") or ""),
+        complete_story=str(arc_data.get("complete_story") or ""),
+        causal_model_json=list(arc_data.get("causal_model") or []),
+        pronunciation_notes_json=list(arc_data.get("pronunciation_notes") or []),
+        script_version=str(arc_data.get("script_version") or ""),
+        review_state=str(arc_data.get("review_state") or "in_review"),
+        field_audit_state=str(arc_data.get("field_audit_state") or "required"),
+        reviewed_by=arc_data.get("reviewed_by"),
+        reviewed_at=_parse_datetime(arc_data.get("reviewed_at")),
+        source_version=arc_data.get("source_version"),
+        publication_decision=arc_data.get("publication_decision"),
+    )
+    db.add(arc)
+    db.flush()
+    for raw in graph.get("fragments") or []:
+        values = dict(raw)
+        fragment_id = str(values["id"])
+        stop_data = dict(values.get("stop") or {})
+        region_data = dict(values.get("trigger_region") or {})
+        stop_id = str(stop_data.get("id") or f"{fragment_id}-stop")
+        stop = Stop(
+            id=stop_id,
+            route_id=route.id,
+            position=int(values["position"]),
+            title=str(stop_data.get("title") or values.get("title") or ""),
+            kicker=str(stop_data.get("kicker") or values.get("safe_preview") or "现场线索"),
+            address=str(stop_data.get("address") or "公共步行区域"),
+            latitude=float(stop_data.get("latitude", region_data.get("latitude"))),
+            longitude=float(stop_data.get("longitude", region_data.get("longitude"))),
+            arrival_radius_m=int(
+                stop_data.get("arrival_radius_m", region_data.get("entry_radius_m", 60))
+            ),
+            story_title=str(stop_data.get("story_title") or values.get("title") or ""),
+            story_body=str(stop_data.get("story_body") or values.get("transcript") or ""),
+            audio_url=stop_data.get("audio_url") or values.get("audio_path"),
+            image=str(stop_data.get("image") or route.hero_image),
+            insight=str(stop_data.get("insight") or values.get("key_claim") or ""),
+        )
+        db.add(stop)
+        db.flush()
+        fragment = StoryFragment(
+            id=fragment_id,
+            arc_id=arc.id,
+            stop_id=stop.id,
+            position=int(values["position"]),
+            title=str(values.get("title") or ""),
+            safe_preview=str(values.get("safe_preview") or ""),
+            narration_script=str(values.get("narration_script") or ""),
+            transcript=str(values.get("transcript") or ""),
+            audio_path=str(values.get("audio_path") or ""),
+            audio_mime_type=str(values.get("audio_mime_type") or "audio/mp4"),
+            audio_size_bytes=int(values.get("audio_size_bytes") or 0),
+            script_version=str(values.get("script_version") or ""),
+            interaction_type=str(values.get("interaction_type") or "passive"),
+            completion_threshold=float(values.get("completion_threshold") or 0.9),
+            key_claim=str(values.get("key_claim") or ""),
+            answers_question=str(values.get("answers_question") or ""),
+            raises_question=str(values.get("raises_question") or ""),
+            authenticity_label=str(values.get("authenticity_label") or "interpretive"),
+            review_state=str(values.get("review_state") or "in_review"),
+        )
+        db.add(fragment)
+        db.flush()
+        db.add(
+            TriggerRegion(
+                id=str(region_data.get("id") or f"{fragment_id}-trigger"),
+                fragment_id=fragment_id,
+                latitude=float(region_data["latitude"]),
+                longitude=float(region_data["longitude"]),
+                entry_radius_m=int(region_data.get("entry_radius_m", 60)),
+                exit_radius_m=int(region_data.get("exit_radius_m", 90)),
+                max_accuracy_m=int(region_data.get("max_accuracy_m", 35)),
+                qualifying_samples=int(region_data.get("qualifying_samples", 2)),
+                sample_window_seconds=int(region_data.get("sample_window_seconds", 15)),
+                cooldown_seconds=int(region_data.get("cooldown_seconds", 120)),
+                audit_state=str(region_data.get("audit_state") or "in_review"),
+                coordinate_system=str(region_data.get("coordinate_system") or "WGS84"),
+                source_coordinate_system=region_data.get("source_coordinate_system"),
+                coordinate_source=region_data.get("coordinate_source"),
+                field_notes=region_data.get("field_notes"),
+            )
+        )
+        mission = values.get("photo_mission")
+        if mission:
+            db.add(
+                PhotoMission(
+                    id=str(mission.get("id") or f"{fragment_id}-mission"),
+                    fragment_id=fragment_id,
+                    prompt=str(mission.get("prompt") or ""),
+                    field_subject=str(mission.get("field_subject") or ""),
+                    safety_copy=str(mission.get("safety_copy") or ""),
+                    accessibility_alternative=str(
+                        mission.get("accessibility_alternative") or ""
+                    ),
+                    authenticity_label=str(
+                        mission.get("authenticity_label") or "interpretive"
+                    ),
+                    required=bool(mission.get("required", True)),
+                    audit_state=str(mission.get("audit_state") or "in_review"),
+                )
+            )
+        for claim_id in values.get("claim_ids") or []:
+            db.add(FragmentClaim(fragment_id=fragment_id, claim_id=str(claim_id)))
+        for required_id in values.get("dependency_ids") or []:
+            db.add(
+                FragmentDependency(
+                    fragment_id=fragment_id, required_fragment_id=str(required_id)
+                )
+            )
+    db.flush()
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if value is None or isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+
+@app.get("/api/admin/routes/{route_id}/content")
+def get_route_content(route_id: str, _: Auth, db: Db):
+    route = db.get(Route, route_id)
+    if route is None:
+        raise HTTPException(404, "路线不存在")
+    return _route_content(db, route)
+
+
+@app.put("/api/admin/routes/{route_id}/content")
+def put_route_content(route_id: str, payload: dict[str, Any], _: Auth, db: Db):
+    route = db.get(Route, route_id)
+    if route is None:
+        raise HTTPException(404, "路线不存在")
+    try:
+        _replace_route_content(db, route, payload)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(422, f"保存碎片路线失败：{exc}") from exc
+    graph = _route_content(db, route)
+    return {"content": graph, "validation": validate_graph(graph, _media_catalog(db))}
+
+
+@app.post("/api/admin/routes/{route_id}/validate")
+def validate_route_content(route_id: str, _: Auth, db: Db):
+    route = db.get(Route, route_id)
+    if route is None:
+        raise HTTPException(404, "路线不存在")
+    return validate_graph(_route_content(db, route), _media_catalog(db))
+
+
+@app.post("/api/admin/routes/{route_id}/publish")
+def publish_route_content(route_id: str, _: Auth, db: Db):
+    route = db.get(Route, route_id)
+    if route is None:
+        raise HTTPException(404, "路线不存在")
+    graph = _route_content(db, route)
+    result = validate_graph(graph, _media_catalog(db))
+    if not result["valid"]:
+        raise HTTPException(422, detail={"code": "content_validation_failed", **result})
+    route.content_status = "verified"
+    route.published_at = datetime.now(UTC)
+    arc = db.scalar(select(StoryArc).where(StoryArc.route_id == route.id))
+    if arc:
+        arc.publication_decision = "field_test"
+    db.commit()
+    return {"route": route_dict(route), "validation": result}
+
+
+@app.post("/api/admin/fragmented-routes/import", status_code=201)
+def import_fragmented_route(payload: dict[str, Any], _: Auth, db: Db):
+    package_id = str(payload.get("package_id") or "").strip()
+    package_version = str(payload.get("package_version") or "").strip()
+    if not package_id or not package_version:
+        raise HTTPException(422, "package_id 和 package_version 必填")
+    now = datetime.now(UTC)
+    for raw in payload.get("media") or []:
+        media_data = dict(raw)
+        asset_key = str(media_data.get("key") or "").strip()
+        storage_path = str(media_data.get("storage_path") or "").strip()
+        mime_type = str(media_data.get("mime_type") or "").strip()
+        candidate = (media_root / storage_path).resolve()
+        if not asset_key or not storage_path or not mime_type.startswith(("image/", "audio/")):
+            raise HTTPException(422, "media 中的 key、storage_path 和图片/音频 MIME 必填")
+        if media_root != candidate and media_root not in candidate.parents:
+            raise HTTPException(422, f"非法媒体路径：{storage_path}")
+        if not candidate.is_file():
+            raise HTTPException(422, f"媒体文件不存在：{storage_path}")
+        item = db.get(MediaAsset, asset_key)
+        path_owner = db.scalar(select(MediaAsset).where(MediaAsset.storage_path == storage_path))
+        if item is not None and path_owner is not None and item.key != path_owner.key:
+            raise HTTPException(409, f"媒体 key 与路径分别属于不同资源：{asset_key}")
+        item = item or path_owner
+        if item is None:
+            db.add(MediaAsset(key=asset_key, storage_path=storage_path, mime_type=mime_type, created_at=now, updated_at=now))
+        else:
+            item.storage_path = storage_path
+            item.mime_type = mime_type
+            item.updated_at = now
+    existing = db.scalar(select(Route).where(Route.managed_package_id == package_id))
+    if existing and existing.managed_package_version == package_version:
+        db.commit()
+        return {
+            "idempotent": True,
+            "route": route_dict(existing),
+            "validation": validate_graph(_route_content(db, existing), _media_catalog(db)),
+        }
+    if existing and _published_route_locked(db, existing):
+        raise HTTPException(409, "published_route_locked")
+    city_data = dict(payload.get("city") or {})
+    city_id = str(city_data.pop("id", "")).strip()
+    if not city_id:
+        raise HTTPException(422, "city.id 必填")
+    city = db.get(City, city_id)
+    if city is None:
+        city = City(id=city_id, **city_data)
+        db.add(city)
+    else:
+        for key, value in city_data.items():
+            setattr(city, key, value)
+    route_data = dict(payload.get("route") or {})
+    route_id = str(route_data.get("id") or "").strip()
+    if not route_id:
+        raise HTTPException(422, "route.id 必填")
+    route = db.get(Route, route_id) or existing
+    if route is None:
+        route = Route(
+            id=route_id,
+            city_id=city_id,
+            slug=str(route_data.get("slug") or ""),
+            title=str(route_data.get("title") or ""),
+            subtitle=str(route_data.get("subtitle") or ""),
+            description=str(route_data.get("description") or ""),
+            duration_minutes=int(route_data.get("duration_minutes") or 1),
+            distance_km=float(route_data.get("distance_km") or 0.1),
+            difficulty=str(route_data.get("difficulty") or "轻松"),
+            theme=str(route_data.get("theme") or "文化漫游"),
+            hero_image=str(route_data.get("hero_image") or ""),
+            is_featured=bool(route_data.get("is_featured", False)),
+            content_status="draft",
+            published_at=None,
+            managed_package_id=package_id,
+            managed_package_version=package_version,
+        )
+        db.add(route)
+        db.flush()
+    payload = {**payload, "route": {**route_data, "id": route.id}}
+    try:
+        _replace_route_content(db, route, payload)
+        db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        raise HTTPException(422, f"导入碎片路线失败：{exc}") from exc
+    graph = _route_content(db, route)
+    return {
+        "idempotent": False,
+        "route": route_dict(route),
+        "validation": validate_graph(graph, _media_catalog(db)),
+    }

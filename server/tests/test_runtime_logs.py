@@ -20,7 +20,7 @@ from sqlalchemy import create_engine  # noqa: E402
 from sqlalchemy.orm import Session  # noqa: E402
 
 import main  # noqa: E402
-from models import ClientRuntimeLog  # noqa: E402
+from models import Base, ClientRuntimeLog, Journey, MediaAsset  # noqa: E402
 from runtime_logs.docker_source import DockerFrameDecoder, DockerLogSource, parse_docker_line  # noqa: E402
 from runtime_logs.normalization import (  # noqa: E402
     NormalizationLimits,
@@ -171,6 +171,131 @@ class StreamingPrimitiveTests(unittest.TestCase):
             self.assertEqual(limiter.active, 0)
 
         asyncio.run(exercise())
+
+
+class FragmentedContentApiTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        Base.metadata.create_all(main.engine)
+        cls.client_context = TestClient(main.app)
+        cls.client = cls.client_context.__enter__()
+        media = Path(_TEMP_DIR.name) / "media"
+        (media / "images").mkdir(parents=True, exist_ok=True)
+        (media / "audio").mkdir(parents=True, exist_ok=True)
+        (media / "images" / "route.png").write_bytes(b"png")
+        (media / "audio" / "one.m4a").write_bytes(b"audio-one")
+        (media / "audio" / "two.m4a").write_bytes(b"audio-two")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.client_context.__exit__(None, None, None)
+
+    def setUp(self):
+        Base.metadata.drop_all(main.engine)
+        Base.metadata.create_all(main.engine)
+
+    @property
+    def headers(self):
+        return {"Authorization": "Bearer admin-test-token"}
+
+    def payload(self):
+        version = "test-v1"
+        return {
+            "package_id": "route-package-test",
+            "package_version": version,
+            "media": [
+                {"key": "cover", "storage_path": "images/route.png", "mime_type": "image/png"},
+                {"key": "audio-one", "storage_path": "audio/one.m4a", "mime_type": "audio/mp4"},
+                {"key": "audio-two", "storage_path": "audio/two.m4a", "mime_type": "audio/mp4"},
+            ],
+            "city": {"id": "city-test", "slug": "test-city", "name": "测试城", "subtitle": "测试", "hero_image": "images/route.png", "latitude": 22.5, "longitude": 114.0},
+            "route": {"id": "route-test", "slug": "route-test", "title": "测试路线", "subtitle": "测试副标题", "description": "测试说明", "duration_minutes": 30, "distance_km": 1.0, "difficulty": "轻松", "theme": "测试", "hero_image": "images/route.png", "is_featured": False},
+            "story_arc": {"id": "arc-test", "title": "完整故事", "central_question": "发生了什么？", "complete_story": "第一件事带来了第二件事。", "causal_model": [{"id": "cause-one", "text": "第一件事发生"}, {"id": "cause-two", "text": "第二件事发生"}], "pronunciation_notes": [], "script_version": version, "review_state": "reviewed", "field_audit_state": "reviewed", "reviewed_by": "tester", "reviewed_at": "2026-08-22T00:00:00Z", "source_version": "source-v1", "publication_decision": None},
+            "sources": [{"id": "source-test", "title": "官方资料", "publisher": "测试机构", "url": "https://example.com/source", "source_type": "government", "accessed_at": "2026-08-22T00:00:00Z", "review_state": "reviewed", "summary": "支持测试主张"}],
+            "claims": [
+                {"id": "claim-one", "canonical_text": "第一件事存在", "claim_kind": "fact", "certainty": "documented", "review_state": "reviewed", "boundary_note": "", "supersedes_claim_id": None, "reviewed_by": "tester", "reviewed_at": "2026-08-22T00:00:00Z", "source_ids": ["source-test"], "support_notes": {"source-test": "直接支持"}},
+                {"id": "claim-two", "canonical_text": "第二件事存在", "claim_kind": "fact", "certainty": "documented", "review_state": "reviewed", "boundary_note": "", "supersedes_claim_id": None, "reviewed_by": "tester", "reviewed_at": "2026-08-22T00:00:00Z", "source_ids": ["source-test"], "support_notes": {"source-test": "直接支持"}},
+            ],
+            "required_photo_mission_count": 1,
+            "fragments": [
+                self.fragment("fragment-one", 1, "audio/one.m4a", "claim-one", 22.5000, 114.0000, [], True),
+                self.fragment("fragment-two", 2, "audio/two.m4a", "claim-two", 22.5030, 114.0030, ["fragment-one"], False),
+            ],
+        }
+
+    def fragment(self, identity, position, audio, claim, latitude, longitude, dependencies, mission):
+        script = f"第 {position} 段经过审核的旁白。"
+        value = {"id": identity, "position": position, "title": f"线索 {position}", "safe_preview": "请继续前行", "narration_script": script, "transcript": script, "audio_path": audio, "audio_mime_type": "audio/mp4", "audio_size_bytes": 9, "script_version": "test-v1", "interaction_type": "photo" if mission else "passive", "completion_threshold": 0.9, "key_claim": "经过来源支持的主张", "answers_question": "回答前一问", "raises_question": "提出下一问", "authenticity_label": "documented", "review_state": "reviewed", "dependency_ids": dependencies, "claim_ids": [claim], "trigger_region": {"id": f"trigger-{position}", "latitude": latitude, "longitude": longitude, "entry_radius_m": 50, "exit_radius_m": 85, "max_accuracy_m": 35, "qualifying_samples": 2, "sample_window_seconds": 15, "cooldown_seconds": 120, "audit_state": "reviewed", "coordinate_system": "WGS84", "source_coordinate_system": "WGS84", "coordinate_source": "现场 GPS 复核", "field_notes": "公共步行区域"}}
+        if mission:
+            value["photo_mission"] = {"id": "mission-one", "prompt": "拍摄现场标志", "field_subject": "公共标志", "safety_copy": "请勿进入车道", "accessibility_alternative": "可拍摄邻近导览牌", "authenticity_label": "documented", "required": True, "audit_state": "reviewed"}
+        return value
+
+    def test_import_validate_publish_idempotency_and_version_lock(self):
+        unauthorized = self.client.post("/api/admin/fragmented-routes/import", json=self.payload())
+        self.assertEqual(unauthorized.status_code, 401)
+
+        now = datetime.now(UTC)
+        with main.SessionLocal() as db:
+            db.add(MediaAsset(key="legacy-cover", storage_path="images/route.png", mime_type="image/png", created_at=now, updated_at=now))
+            db.commit()
+
+        imported = self.client.post("/api/admin/fragmented-routes/import", headers=self.headers, json=self.payload())
+        self.assertEqual(imported.status_code, 201, imported.text)
+        self.assertTrue(imported.json()["validation"]["valid"], imported.text)
+        self.assertIsNone(imported.json()["route"]["published_at"])
+
+        imported_graph = self.client.get(
+            "/api/admin/routes/route-test/content", headers=self.headers
+        ).json()
+        imported_graph["story_arc"]["central_question"] = "后台表单修改后的问题？"
+        saved = self.client.put(
+            "/api/admin/routes/route-test/content",
+            headers=self.headers,
+            json=imported_graph,
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertTrue(saved.json()["validation"]["valid"], saved.text)
+        self.assertEqual(
+            saved.json()["content"]["story_arc"]["central_question"],
+            "后台表单修改后的问题？",
+        )
+        self.assertEqual(
+            [item["id"] for item in saved.json()["content"]["fragments"]],
+            ["fragment-one", "fragment-two"],
+        )
+        protected_media = self.client.delete(
+            "/api/admin/media/audio-one", headers=self.headers
+        )
+        self.assertEqual(protected_media.status_code, 409, protected_media.text)
+
+        repeated = self.client.post("/api/admin/fragmented-routes/import", headers=self.headers, json=self.payload())
+        self.assertEqual(repeated.status_code, 201, repeated.text)
+        self.assertTrue(repeated.json()["idempotent"])
+
+        published = self.client.post("/api/admin/routes/route-test/publish", headers=self.headers)
+        self.assertEqual(published.status_code, 200, published.text)
+        self.assertTrue(published.json()["validation"]["valid"])
+
+        with main.SessionLocal() as db:
+            db.add(Journey(id="journey-test", route_id="route-test", status="active"))
+            db.commit()
+        graph = self.client.get("/api/admin/routes/route-test/content", headers=self.headers).json()
+        graph["story_arc"]["complete_story"] = "试图覆盖已使用版本"
+        locked = self.client.put("/api/admin/routes/route-test/content", headers=self.headers, json=graph)
+        self.assertEqual(locked.status_code, 409, locked.text)
+
+    def test_publish_rejects_missing_media(self):
+        payload = self.payload()
+        payload["package_id"] = "invalid-package"
+        payload["package_version"] = "invalid-v1"
+        payload["route"]["id"] = "invalid-route"
+        payload["route"]["slug"] = "invalid-route"
+        payload["fragments"][0]["audio_path"] = "audio/not-registered.m4a"
+        imported = self.client.post("/api/admin/fragmented-routes/import", headers=self.headers, json=payload)
+        self.assertEqual(imported.status_code, 201, imported.text)
+        self.assertFalse(imported.json()["validation"]["valid"])
+        published = self.client.post("/api/admin/routes/invalid-route/publish", headers=self.headers)
+        self.assertEqual(published.status_code, 422, published.text)
 
 
 class RuntimeLogApiTests(unittest.TestCase):
