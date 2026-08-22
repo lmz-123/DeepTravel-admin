@@ -58,6 +58,27 @@ class NarrationSynthesizerTests(unittest.TestCase):
         self.assertEqual(failed.exception.code, "provider_error")
         self.assertNotIn("secret upstream detail", str(failed.exception))
 
+        balance_client = httpx.Client(
+            transport=httpx.MockTransport(
+                lambda _: httpx.Response(
+                    200,
+                    json={
+                        "base_resp": {
+                            "status_code": 1008,
+                            "status_msg": "insufficient balance",
+                        }
+                    },
+                )
+            )
+        )
+        with self.assertRaises(NarrationSynthesisError) as balance:
+            MiniMaxNarrationSynthesizer(
+                api_key="test-key",
+                endpoint="https://tts.example.test",
+                client=balance_client,
+            ).synthesize(self.request())
+        self.assertEqual(balance.exception.code, "insufficient_balance")
+
     def test_fake_is_deterministic_without_paid_credentials(self):
         synthesizer = DeterministicNarrationSynthesizer()
         self.assertEqual(synthesizer.synthesize(self.request()).payload, synthesizer.synthesize(self.request()).payload)

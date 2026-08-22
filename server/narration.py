@@ -81,6 +81,11 @@ class MiniMaxNarrationSynthesizer:
             body = response.json()
             base_resp = body.get("base_resp") or {}
             if base_resp.get("status_code") not in (None, 0):
+                provider_message = str(base_resp.get("status_msg") or "").lower()
+                if base_resp.get("status_code") == 1008 or "insufficient balance" in provider_message:
+                    raise NarrationSynthesisError("insufficient_balance", "MiniMax 账户余额不足")
+                if "api key" in provider_message or "unauthorized" in provider_message:
+                    raise NarrationSynthesisError("credentials_invalid", "MiniMax 凭证无效")
                 raise NarrationSynthesisError("provider_rejected")
             audio_hex = (body.get("data") or {}).get("audio")
             if not isinstance(audio_hex, str) or not audio_hex:

@@ -155,8 +155,23 @@ type NarrationConfigView = {
   provider: string;
   model: string;
   default_voice_id: string;
+  credentials_configured: boolean;
   supported_emotions: string[];
   presets: NarrationVariant[];
+};
+type NarrationBatchResult = {
+  route_id: string;
+  generated_count: number;
+  failed_count: number;
+  skipped_count: number;
+  coverage: NarrationCoverage;
+  results: Array<{
+    fragment_id: string;
+    title: string;
+    status: "saved" | "failed" | "skipped";
+    error_code?: string;
+    media_path?: string;
+  }>;
 };
 
 const navItems: Array<[Tab, string, string]> = [
@@ -1523,16 +1538,22 @@ function FragmentedRouteWorkspace({
                           />
                         </Field>
                       </div>
-                      <NarrationAudition
-                        fragmentId={str(fragment.id)}
-                        profile={selectedNarrationProfile}
-                        request={request}
-                        setNotice={setNotice}
-                        onApproved={() => {
-                          void load(routeId);
-                          void loadNarrationCoverage();
-                        }}
-                      />
+                      <details className="narration-node-tools">
+                        <summary>单节点音频纠错（可选）</summary>
+                        <NarrationAudition
+                          fragmentId={str(fragment.id)}
+                          profile={selectedNarrationProfile}
+                          hasCurrentOfficialAudio={Boolean(
+                            narrationCoverage?.complete_fragment_ids.includes(str(fragment.id)),
+                          )}
+                          request={request}
+                          setNotice={setNotice}
+                          onApproved={() => {
+                            void load(routeId);
+                            void loadNarrationCoverage();
+                          }}
+                        />
+                      </details>
                       <div className="fragment-subhead">WGS-84 定位触发</div>
                       <div className="form-grid three">
                         <Field label="纬度">
@@ -1835,7 +1856,22 @@ function NarrationProfilePanel({
   const selected = profiles.find((item) => item.id === selectedProfileId);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [batchBusy, setBatchBusy] = useState(false);
+  const [credentialsConfigured, setCredentialsConfigured] = useState(false);
+  const [batchResult, setBatchResult] = useState<NarrationBatchResult | null>(null);
   const [drafts, setDrafts] = useState<Record<string, Partial<NarrationProfileView>>>({});
+
+  useEffect(() => {
+    let active = true;
+    request<NarrationConfigView>("/narration/config")
+      .then((config) => {
+        if (active) setCredentialsConfigured(config.credentials_configured);
+      })
+      .catch((error) => {
+        if (active) setNotice(error instanceof Error ? error.message : "语音服务配置读取失败");
+      });
+    return () => { active = false; };
+  }, [request, setNotice]);
 
   async function mutate(path: string, init: RequestInit, success: string) {
     setBusy(true);
@@ -1875,6 +1911,48 @@ function NarrationProfilePanel({
       ...current,
       [selected.id]: { ...(current[selected.id] || selected), ...changes },
     }));
+
+  async function generateRoute(regenerateAll: boolean) {
+    setBatchBusy(true);
+    setBatchResult(null);
+    try {
+      const editableKeys: Array<keyof NarrationProfileView> = [
+        "display_name", "description", "voice_id", "emotion", "speed", "pitch", "display_order",
+      ];
+      const changed = editableKeys.some((key) => draft[key] !== selected[key]);
+      if (changed) {
+        await request<NarrationProfileView>(`/narration/profiles/${selected.id}`, {
+          method: "PUT",
+          body: JSON.stringify(draft),
+        });
+      }
+      const value = await request<NarrationBatchResult>(
+        `/routes/${routeId}/narration/generate`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            profile_id: selected.id,
+            regenerate_all: regenerateAll,
+          }),
+        },
+      );
+      setBatchResult(value);
+      if (value.failed_count) {
+        setNotice(`已保存 ${value.generated_count} 条，${value.failed_count} 条失败；可直接重试失败节点`);
+      } else if (value.generated_count) {
+        setNotice(`整条路线已生成并保存 ${value.generated_count} 条正式音频`);
+      } else {
+        setNotice("当前音色已经覆盖整条路线，无需重复生成");
+      }
+      onChanged();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "整条路线音频生成失败");
+    } finally {
+      setBatchBusy(false);
+    }
+  }
+
+  const incomplete = (coverage?.missing.length ?? 0) + (coverage?.stale.length ?? 0);
   return (
     <article className="panel narration-profile-panel">
       <div className="panel-heading">
@@ -1928,6 +2006,61 @@ function NarrationProfilePanel({
             <Field label="默认音调"><input type="number" min="-12" max="12" value={num(draft.pitch, 0)} onChange={(event) => updateDraft({ pitch: Number(event.target.value) })} /></Field>
           </div>
           <Field label="客户端风格说明"><textarea rows={2} value={str(draft.description)} onChange={(event) => updateDraft({ description: event.target.value })} /></Field>
+          <section className="voice-route-generator">
+            <div>
+              <p className="eyebrow">ONE-CLICK ROUTE AUDIO</p>
+              <h3>一次生成整条路线</h3>
+              <p>
+                当前选择“{selected.display_name}”。系统会用同一音色为全部故事节点生成并直接保存正式音频；客户端只会展示完整覆盖且已发布的音色。
+              </p>
+            </div>
+            <div className="voice-route-generator-actions">
+              <button
+                className="primary-button"
+                disabled={batchBusy || !credentialsConfigured || !routeId}
+                onClick={() => void generateRoute(coverage?.ready || !incomplete)}
+              >
+                {batchBusy
+                  ? "正在生成整条路线…"
+                  : incomplete
+                    ? `生成缺失的 ${incomplete} 个节点`
+                    : coverage?.ready
+                      ? "重新生成整条路线正式音频"
+                      : "一键生成整条路线正式音频"}
+              </button>
+              {incomplete > 0 && coverage && coverage.complete_count > 0 && (
+                <button
+                  className="ghost-button"
+                  disabled={batchBusy || !credentialsConfigured}
+                  onClick={() => void generateRoute(true)}
+                >
+                  重新生成全部节点
+                </button>
+              )}
+            </div>
+            {!credentialsConfigured && <strong className="voice-route-warning">请先在服务器配置 MiniMax 凭证</strong>}
+            {batchResult && (
+              <div className="voice-route-result">
+                <strong>
+                  保存 {batchResult.generated_count} · 失败 {batchResult.failed_count} · 跳过 {batchResult.skipped_count}
+                </strong>
+                <ul>
+                  {batchResult.results.map((item) => (
+                    <li key={item.fragment_id} className={item.status}>
+                      <span>{item.title}</span>
+                      <small>
+                        {item.status === "saved"
+                          ? "正式音频已保存"
+                          : item.status === "skipped"
+                            ? "已有当前版本"
+                            : `失败：${narrationErrorMessage(item.error_code)}`}
+                      </small>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
           <div className="voice-profile-actions">
             <button className="ghost-button" disabled={busy} onClick={() => void mutate(`/narration/profiles/${selected.id}`, { method: "PUT", body: JSON.stringify(draft) }, "音色档案已保存")}>保存档案</button>
             <button className="primary-button" disabled={busy || !coverage?.ready || selected.status === "published"} onClick={() => void mutate(`/narration/profiles/${selected.id}/publish`, { method: "POST", body: JSON.stringify({ route_id: routeId }) }, "音色已发布到客户端")}>发布音色</button>
@@ -1943,12 +2076,14 @@ function NarrationProfilePanel({
 function NarrationAudition({
   fragmentId,
   profile,
+  hasCurrentOfficialAudio,
   request,
   setNotice,
   onApproved,
 }: {
   fragmentId: string;
   profile?: NarrationProfileView;
+  hasCurrentOfficialAudio: boolean;
   request: <T>(p: string, i?: RequestInit) => Promise<T>;
   setNotice: (x: string) => void;
   onApproved: () => void;
@@ -1958,9 +2093,11 @@ function NarrationAudition({
   const [busy, setBusy] = useState(false);
   const [provider, setProvider] = useState("");
   const [model, setModel] = useState("");
+  const [credentialsConfigured, setCredentialsConfigured] = useState(false);
   const [voiceId, setVoiceId] = useState("");
   const [emotions, setEmotions] = useState(["neutral", "happy"]);
   const [variants, setVariants] = useState<NarrationVariant[]>([]);
+  const [savedPreviewId, setSavedPreviewId] = useState<string | null>(null);
   const objectUrls = useRef<string[]>([]);
 
   useEffect(() => () => objectUrls.current.forEach(URL.revokeObjectURL), []);
@@ -1972,6 +2109,7 @@ function NarrationAudition({
         if (!active) return;
         setProvider(profile?.provider || config.provider);
         setModel(profile?.model || config.model);
+        setCredentialsConfigured(config.credentials_configured);
         setVoiceId(profile?.voice_id || config.default_voice_id);
         setEmotions(config.supported_emotions);
         setVariants(config.presets.map((item) => profile ? {
@@ -1995,6 +2133,10 @@ function NarrationAudition({
   async function generate() {
     setBusy(true);
     try {
+      objectUrls.current.forEach(URL.revokeObjectURL);
+      objectUrls.current = [];
+      setAudioUrls({});
+      setSavedPreviewId(null);
       const value = await request<{ previews: NarrationPreviewView[] }>(
         `/fragments/${fragmentId}/narration/previews`,
         {
@@ -2006,8 +2148,20 @@ function NarrationAudition({
         },
       );
       setPreviews(value.previews);
-      const ready = value.previews.filter((item) => item.status === "ready").length;
-      setNotice(ready ? `已生成 ${ready} 个情感旁白版本` : "语音凭证不可用，可继续使用手动上传音频");
+      const readyItems = value.previews.filter((item) => item.status === "ready");
+      const errorCodes = new Set(
+        value.previews.map((item) => item.error_code).filter(Boolean),
+      );
+      if (readyItems.length) {
+        setNotice(
+          `已生成并临时保存 ${readyItems.length} 个试听版本；请试听后选择一个保存为正式音频`,
+        );
+        void Promise.all(readyItems.map((item) => loadAudio(item, true)));
+      } else if (errorCodes.has("credentials_unavailable")) {
+        setNotice("MiniMax 凭证未配置，未生成任何试听音频");
+      } else {
+        setNotice(`旁白生成失败：${Array.from(errorCodes).join("、") || "语音服务不可用"}`);
+      }
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "旁白生成失败");
     } finally {
@@ -2015,7 +2169,7 @@ function NarrationAudition({
     }
   }
 
-  async function loadAudio(item: NarrationPreviewView) {
+  async function loadAudio(item: NarrationPreviewView, quiet = false) {
     if (!item.playback_path || audioUrls[item.id]) return;
     try {
       const data = await request<ArrayBuffer>(item.playback_path);
@@ -2026,7 +2180,9 @@ function NarrationAudition({
         [item.id]: url,
       }));
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "试听加载失败");
+      if (!quiet) {
+        setNotice(error instanceof Error ? error.message : "试听加载失败");
+      }
     }
   }
 
@@ -2034,8 +2190,12 @@ function NarrationAudition({
     setBusy(true);
     try {
       await request(`/narration/previews/${item.id}/approve`, { method: "POST" });
-      setPreviews((current) => current.map((row) => row.id === item.id ? { ...row, status: "approved" } : row));
-      setNotice("旁白已批准并绑定到当前文字稿");
+      setPreviews((current) => current.map((row) => {
+        if (row.id === item.id) return { ...row, status: "approved" };
+        return row.status === "approved" ? { ...row, status: "ready" } : row;
+      }));
+      setSavedPreviewId(item.id);
+      setNotice("正式音频已保存并绑定当前文字稿；路线音色覆盖进度已更新");
       onApproved();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "批准旁白失败");
@@ -2047,10 +2207,28 @@ function NarrationAudition({
   return (
     <section className="narration-audition">
       <div className="fragment-subhead">情感旁白试听 · {profile?.display_name || "默认音色"}</div>
-      <p>在这里配置音色 ID、情绪、语速和音调。三个版本使用同一文字稿，批准前不会改变线上音频。</p>
+      <div className={`narration-save-state ${hasCurrentOfficialAudio ? "saved" : "missing"}`}>
+        <strong>{hasCurrentOfficialAudio ? "当前线索已保存正式音频" : "当前线索尚未保存正式音频"}</strong>
+        <span>
+          {hasCurrentOfficialAudio
+            ? "重新生成并保存其他版本会替换这个音色在当前线索下的正式音频。"
+            : "生成只会创建临时试听；必须选中一个版本并保存，才会计入路线覆盖。"}
+        </span>
+      </div>
+      <ol className="narration-workflow" aria-label="旁白保存流程">
+        <li><b>1</b><span><strong>生成临时试听</strong><small>调整音色、情绪、语速和音调</small></span></li>
+        <li><b>2</b><span><strong>试听并保存一个版本</strong><small>点击“选用并保存为正式音频”</small></span></li>
+        <li><b>3</b><span><strong>完成整条路线后发布音色</strong><small>返回上方音色面板执行发布</small></span></li>
+      </ol>
+      <p className="narration-storage-note">
+        试听版本是私有临时文件，默认保留 24 小时，不会自动上线；保存后的正式音频会进入公共媒体存储并绑定当前文字稿。
+      </p>
       <div className="narration-provider-line">
         <span>服务：{provider || "加载中"}</span>
         <span>模型：{model || "加载中"}</span>
+        <span className={credentialsConfigured ? "configured" : "unconfigured"}>
+          {credentialsConfigured ? "语音凭证已配置" : "语音凭证未配置"}
+        </span>
       </div>
       <label className="field narration-voice-field">
         <span>音色 Voice ID</span>
@@ -2080,19 +2258,32 @@ function NarrationAudition({
           </label>
         </article>)}
       </div>
-      <button className="ghost-button" onClick={() => void generate()} disabled={busy || !fragmentId || !voiceId.trim() || variants.length < 3}>
-        {busy ? "处理中…" : "生成 3 个试听版本"}
+      <button className="ghost-button" onClick={() => void generate()} disabled={busy || !fragmentId || !voiceId.trim() || variants.length < 3 || !credentialsConfigured}>
+        {busy ? "处理中…" : "生成 3 个临时试听版本"}
       </button>
       {previews.length > 0 && <div className="narration-preview-grid">
-        {previews.map((item) => <article key={item.id}>
-          <strong>{str(item.metadata.label) || item.emotion}</strong>
+        {previews.map((item) => <article key={item.id} className={savedPreviewId === item.id || item.status === "approved" ? "official" : ""}>
+          <div className="narration-preview-heading">
+            <strong>{str(item.metadata.label) || item.emotion}</strong>
+            {(savedPreviewId === item.id || item.status === "approved") && <span>正式音频</span>}
+          </div>
           <small>{item.voice_id} · {item.emotion} · {item.speed}× · pitch {item.pitch}</small>
-          {item.status === "failed" ? <em>暂不可用：{item.error_code}</em> : <>
-            {!audioUrls[item.id] ? <button onClick={() => void loadAudio(item)}>加载试听</button> : <>
+          {item.status === "failed" ? <em>暂不可用：{narrationErrorMessage(item.error_code)}</em> : <>
+            {!audioUrls[item.id] ? <button onClick={() => void loadAudio(item)}>播放器加载失败，点击重试</button> : <>
               {/* eslint-disable-next-line jsx-a11y/media-has-caption -- the exact transcript is visible in the fragment editor */}
               <audio controls src={audioUrls[item.id]} aria-label={`${str(item.metadata.label) || item.emotion}旁白试听`} />
             </>}
-            <button onClick={() => void approve(item)} disabled={busy || item.status === "approved"}>{item.status === "approved" ? "已批准" : "采用此版本"}</button>
+            <button
+              className="save-official-audio"
+              onClick={() => void approve(item)}
+              disabled={busy || item.status === "approved"}
+            >
+              {item.status === "approved"
+                ? "已保存为正式音频"
+                : hasCurrentOfficialAudio || savedPreviewId
+                  ? "改用此版本并替换正式音频"
+                  : "选用并保存为正式音频"}
+            </button>
           </>}
         </article>)}
       </div>}
@@ -2872,4 +3063,19 @@ function str(value: unknown) {
 }
 function num(value: unknown, fallback: number) {
   return value == null || value === "" ? fallback : Number(value);
+}
+
+function narrationErrorMessage(code?: string | null) {
+  const messages: Record<string, string> = {
+    credentials_unavailable: "MiniMax 凭证未配置",
+    credentials_invalid: "MiniMax 凭证无效",
+    insufficient_balance: "MiniMax 账户余额不足",
+    provider_unavailable: "MiniMax 服务暂时不可用",
+    provider_rejected: "MiniMax 拒绝了本次生成请求",
+    provider_error: "MiniMax 请求失败",
+    invalid_provider_response: "MiniMax 返回了无效音频",
+    storage_unavailable: "正式音频存储失败",
+    empty_transcript: "旁白文字稿为空",
+  };
+  return messages[code || ""] || code || "未知错误";
 }

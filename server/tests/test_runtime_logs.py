@@ -40,6 +40,7 @@ from runtime_logs.normalization import (  # noqa: E402
 )
 from runtime_logs.storage import cleanup_client_logs, ensure_client_log_schema, query_client_events  # noqa: E402
 from runtime_logs.streaming import StreamLimiter, limited_stream, sse_message  # noqa: E402
+from narration import NarrationSynthesisError  # noqa: E402
 
 
 class NormalizationTests(unittest.TestCase):
@@ -390,6 +391,7 @@ class FragmentedContentApiTests(unittest.TestCase):
         config = self.client.get("/api/admin/narration/config", headers=self.headers)
         self.assertEqual(config.status_code, 200, config.text)
         self.assertEqual(config.json()["default_voice_id"], main.settings.minimax_voice_id)
+        self.assertTrue(config.json()["credentials_configured"])
         self.assertEqual(len(config.json()["presets"]), 3)
 
         generated = self.client.post(
@@ -596,6 +598,69 @@ class FragmentedContentApiTests(unittest.TestCase):
             "/api/admin/routes/route-test/content", headers=self.headers
         ).json()["fragments"][0]["audio_path"]
         self.assertEqual(unchanged, original)
+
+    def test_route_batch_generates_formal_tracks_and_retries_only_failed_nodes(self):
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import", headers=self.headers, json=self.payload()
+        )
+        self.assertEqual(imported.status_code, 201, imported.text)
+        created = self.client.post(
+            "/api/admin/narration/profiles",
+            headers=self.headers,
+            json={
+                "slug": "route-batch-voice",
+                "display_name": "整线讲述者",
+                "voice_id": "voice-route-batch",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        profile_id = created.json()["id"]
+        original_synthesizer = main.narration_synthesizer
+
+        class FailSecondFragment:
+            provider = original_synthesizer.provider
+            model = original_synthesizer.model
+
+            def synthesize(self, request):
+                if "第 2 段" in request.transcript:
+                    raise NarrationSynthesisError("provider_unavailable")
+                return original_synthesizer.synthesize(request)
+
+        main.narration_synthesizer = FailSecondFragment()
+        try:
+            partial = self.client.post(
+                "/api/admin/routes/route-test/narration/generate",
+                headers=self.headers,
+                json={"profile_id": profile_id, "regenerate_all": True},
+            )
+        finally:
+            main.narration_synthesizer = original_synthesizer
+        self.assertEqual(partial.status_code, 201, partial.text)
+        self.assertEqual(partial.json()["generated_count"], 1)
+        self.assertEqual(partial.json()["failed_count"], 1)
+        self.assertFalse(partial.json()["coverage"]["ready"])
+        self.assertEqual(
+            [item["fragment_id"] for item in partial.json()["results"] if item["status"] == "failed"],
+            ["fragment-two"],
+        )
+
+        retried = self.client.post(
+            "/api/admin/routes/route-test/narration/generate",
+            headers=self.headers,
+            json={"profile_id": profile_id},
+        )
+        self.assertEqual(retried.status_code, 201, retried.text)
+        self.assertEqual(retried.json()["generated_count"], 1)
+        self.assertEqual(retried.json()["failed_count"], 0)
+        self.assertEqual(retried.json()["skipped_count"], 1)
+        self.assertTrue(retried.json()["coverage"]["ready"])
+        self.assertEqual(retried.json()["profile"]["status"], "draft")
+        with main.SessionLocal() as db:
+            tracks = list(
+                db.query(FragmentNarrationTrack).filter_by(profile_id=profile_id)
+            )
+            self.assertEqual(len(tracks), 2)
+            self.assertTrue(all("/route-batch-voice/" in row.media_path for row in tracks))
 
     def test_same_checksum_assets_share_object_without_unsafe_deletion(self):
         first = self.client.post(

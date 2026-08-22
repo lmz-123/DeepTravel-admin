@@ -53,7 +53,15 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.match(admin, /submit-review/);
   assert.match(admin, /verified: \{ endpoint: "publish"/);
   assert.match(admin, /已审核 · 未发布/);
-  assert.match(admin, /生成 3 个试听版本/);
+  assert.match(admin, /生成 3 个临时试听版本/);
+  assert.match(admin, /选用并保存为正式音频/);
+  assert.match(admin, /当前线索已保存正式音频/);
+  assert.match(admin, /不会自动上线/);
+  assert.match(admin, /credentials_configured/);
+  assert.match(admin, /一次生成整条路线/);
+  assert.match(admin, /一键生成整条路线正式音频/);
+  assert.match(admin, /单节点音频纠错（可选）/);
+  assert.match(admin, /routes\/\$\{routeId\}\/narration\/generate/);
   assert.match(admin, /\/narration\/config/);
   assert.match(admin, /音色 Voice ID/);
   assert.match(admin, /语速/);
