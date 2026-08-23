@@ -298,6 +298,45 @@ class FragmentedContentApiTests(unittest.TestCase):
         imported_graph = self.client.get(
             "/api/admin/routes/route-test/content", headers=self.headers
         ).json()
+        now = datetime.now(UTC)
+        script = imported_graph["fragments"][0]["narration_script"]
+        with main.SessionLocal() as db:
+            db.add(
+                NarrationVoiceProfile(
+                    id="save-test-profile",
+                    slug="save-test-profile",
+                    display_name="保存测试音色",
+                    description="",
+                    provider="fake",
+                    model="fake",
+                    voice_id="fake",
+                    emotion="neutral",
+                    speed=1.0,
+                    pitch=0,
+                    status="published",
+                    is_default=False,
+                    created_at=now,
+                    updated_at=now,
+                    published_at=now,
+                )
+            )
+            db.add(
+                FragmentNarrationTrack(
+                    id="save-test-track",
+                    fragment_id="fragment-one",
+                    profile_id="save-test-profile",
+                    transcript_hash=hashlib.sha256(script.strip().encode()).hexdigest(),
+                    script_version="test-v1",
+                    media_path="audio/one.m4a",
+                    mime_type="audio/mp4",
+                    size_bytes=9,
+                    checksum_sha256=None,
+                    generation_metadata_json={"test": True},
+                    approved_at=now,
+                    published_at=now,
+                )
+            )
+            db.commit()
         imported_graph["story_arc"]["central_question"] = "后台表单修改后的问题？"
         saved = self.client.put(
             "/api/admin/routes/route-test/content",
@@ -321,6 +360,10 @@ class FragmentedContentApiTests(unittest.TestCase):
             saved_mission["composition_tip"],
             "保留标志与周边环境，主体置于画面中央",
         )
+        with main.SessionLocal() as db:
+            saved_track = db.get(FragmentNarrationTrack, "save-test-track")
+            self.assertIsNotNone(saved_track)
+            self.assertEqual(saved_track.media_path, "audio/one.m4a")
         protected_media = self.client.delete(
             "/api/admin/media/audio-one", headers=self.headers
         )

@@ -2612,7 +2612,56 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
         old_fragment_ids = list(
             db.scalars(select(StoryFragment.id).where(StoryFragment.arc_id == old_arc.id))
         )
+    incoming_fragments = {
+        str(item.get("id") or ""): item for item in graph.get("fragments") or []
+    }
+    preserved_narration_tracks: list[dict[str, Any]] = []
     if old_fragment_ids:
+        for track in db.scalars(
+            select(FragmentNarrationTrack).where(
+                FragmentNarrationTrack.fragment_id.in_(old_fragment_ids)
+            )
+        ):
+            fragment = incoming_fragments.get(track.fragment_id)
+            if fragment is None:
+                continue
+            expected_hash = hashlib.sha256(
+                str(fragment.get("narration_script") or "").strip().encode()
+            ).hexdigest()
+            expected_version = str(fragment.get("script_version") or "")
+            if (
+                track.transcript_hash != expected_hash
+                or track.script_version != expected_version
+            ):
+                continue
+            preserved_narration_tracks.append(
+                {
+                    "id": track.id,
+                    "fragment_id": track.fragment_id,
+                    "profile_id": track.profile_id,
+                    "transcript_hash": track.transcript_hash,
+                    "script_version": track.script_version,
+                    "media_path": track.media_path,
+                    "mime_type": track.mime_type,
+                    "size_bytes": track.size_bytes,
+                    "checksum_sha256": track.checksum_sha256,
+                    "generation_metadata_json": dict(
+                        track.generation_metadata_json or {}
+                    ),
+                    "approved_at": track.approved_at,
+                    "published_at": track.published_at,
+                }
+            )
+        db.execute(
+            delete(NarrationPreview).where(
+                NarrationPreview.fragment_id.in_(old_fragment_ids)
+            )
+        )
+        db.execute(
+            delete(FragmentNarrationTrack).where(
+                FragmentNarrationTrack.fragment_id.in_(old_fragment_ids)
+            )
+        )
         db.execute(delete(FragmentClaim).where(FragmentClaim.fragment_id.in_(old_fragment_ids)))
         db.execute(
             delete(FragmentDependency).where(
@@ -2786,6 +2835,9 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
                     fragment_id=fragment_id, required_fragment_id=str(required_id)
                 )
             )
+    db.flush()
+    for track in preserved_narration_tracks:
+        db.add(FragmentNarrationTrack(**track))
     home_story_data = dict(graph.get("home_story") or {})
     if home_story_data:
         now = datetime.now(UTC)
