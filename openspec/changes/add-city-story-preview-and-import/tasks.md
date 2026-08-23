@@ -45,4 +45,4 @@
 - [ ] 7.1 Run backend/admin frontend tests, type/lint/build checks, and a representative manual catalog/module/pre-trip workflow against the migrated main database.
 - [ ] 7.2 Complete an end-to-end multi-city upload → dry-run → confirm → edit → submit-review smoke test and verify existing single-route and legacy CRUD workflows still function.
 - [x] 7.3 Update operator/import documentation, permission notes, package examples, and run `openspec validate add-city-story-preview-and-import --strict` in both repositories.
-- [ ] 7.4 Commit and push scoped independent-admin changes after companion main contracts are ready, without adding migrations or unrelated workspace files.
+- [x] 7.4 Commit and push scoped independent-admin changes after companion main contracts are ready, without adding migrations or unrelated workspace files.
