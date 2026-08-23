@@ -1223,9 +1223,20 @@ def story_transcript_hash(arc: StoryArc) -> str:
     return hashlib.sha256(arc.complete_story.strip().encode()).hexdigest()
 
 
+def home_story_defaults(arc: StoryArc, route: Route | None) -> tuple[str, str]:
+    introduction = (
+        str(route.subtitle or "").strip()
+        if route is not None
+        else ""
+    ) or f"戴上耳机，听听「{arc.title}」的完整故事。"
+    cover_image = str(route.hero_image or "").strip() if route is not None else ""
+    return introduction, cover_image
+
+
 def home_story_dict(db: Session, arc: StoryArc) -> dict[str, Any]:
     route = db.get(Route, arc.route_id)
     city = db.get(City, route.city_id) if route else None
+    default_introduction, default_cover_image = home_story_defaults(arc, route)
     publication = db.scalar(
         select(HomeStoryPublication).where(HomeStoryPublication.arc_id == arc.id)
     )
@@ -1276,9 +1287,9 @@ def home_story_dict(db: Session, arc: StoryArc) -> dict[str, Any]:
     else:
         if not publication.title.strip():
             blockers.append("标题为空")
-        if not publication.introduction.strip():
+        if not (publication.introduction.strip() or default_introduction):
             blockers.append("简介为空")
-        if not publication.cover_image.strip():
+        if not (publication.cover_image.strip() or default_cover_image):
             blockers.append("封面为空")
         if publication.selection_weight <= 0:
             blockers.append("随机权重必须大于 0")
@@ -1306,8 +1317,10 @@ def home_story_dict(db: Session, arc: StoryArc) -> dict[str, Any]:
             {
                 "id": publication.id,
                 "title": publication.title,
-                "introduction": publication.introduction,
-                "cover_image": publication.cover_image,
+                "introduction": publication.introduction.strip()
+                or default_introduction,
+                "cover_image": publication.cover_image.strip()
+                or default_cover_image,
                 "selection_weight": publication.selection_weight,
                 "status": publication.status,
                 "selected_track_id": publication.selected_track_id,
@@ -1340,6 +1353,8 @@ def list_home_stories(_: Auth, db: Db):
 @app.put("/api/admin/home-stories/{arc_id}")
 def save_home_story(arc_id: str, payload: dict[str, Any], _: Auth, db: Db):
     arc = require_story_arc(db, arc_id)
+    route = db.get(Route, arc.route_id)
+    default_introduction, default_cover_image = home_story_defaults(arc, route)
     item = db.scalar(
         select(HomeStoryPublication).where(HomeStoryPublication.arc_id == arc.id)
     )
@@ -1349,8 +1364,8 @@ def save_home_story(arc_id: str, payload: dict[str, Any], _: Auth, db: Db):
             id=str(uuid4()),
             arc_id=arc.id,
             title=arc.title,
-            introduction="",
-            cover_image="",
+            introduction=default_introduction,
+            cover_image=default_cover_image,
             selection_weight=1,
             status="draft",
             created_at=now,
@@ -1360,8 +1375,14 @@ def save_home_story(arc_id: str, payload: dict[str, Any], _: Auth, db: Db):
     if item.status == "published":
         raise HTTPException(409, "已发布故事请先撤回，再修改")
     title = str(payload.get("title", item.title)).strip()
-    introduction = str(payload.get("introduction", item.introduction)).strip()
-    cover_image = str(payload.get("cover_image", item.cover_image)).strip()
+    introduction = (
+        str(payload.get("introduction", item.introduction)).strip()
+        or default_introduction
+    )
+    cover_image = (
+        str(payload.get("cover_image", item.cover_image)).strip()
+        or default_cover_image
+    )
     try:
         selection_weight = int(payload.get("selection_weight", item.selection_weight))
     except (TypeError, ValueError) as error:
@@ -1497,12 +1518,15 @@ def generate_home_story_track(arc_id: str, payload: dict[str, Any], _: Auth, db:
             select(HomeStoryPublication).where(HomeStoryPublication.arc_id == arc.id)
         )
         if publication is None:
+            default_introduction, default_cover_image = home_story_defaults(
+                arc, db.get(Route, arc.route_id)
+            )
             publication = HomeStoryPublication(
                 id=str(uuid4()),
                 arc_id=arc.id,
                 title=arc.title,
-                introduction="",
-                cover_image="",
+                introduction=default_introduction,
+                cover_image=default_cover_image,
                 selection_weight=1,
                 status="draft",
                 created_at=now,
@@ -1624,12 +1648,15 @@ def upload_home_story_track(
             select(HomeStoryPublication).where(HomeStoryPublication.arc_id == arc.id)
         )
         if publication is None:
+            default_introduction, default_cover_image = home_story_defaults(
+                arc, db.get(Route, arc.route_id)
+            )
             publication = HomeStoryPublication(
                 id=str(uuid4()),
                 arc_id=arc.id,
                 title=arc.title,
-                introduction="",
-                cover_image="",
+                introduction=default_introduction,
+                cover_image=default_cover_image,
                 selection_weight=1,
                 status="draft",
                 created_at=now,
@@ -1677,8 +1704,12 @@ def transition_home_story(arc_id: str, action: str, _: Auth, db: Db):
     if action == "submit-review":
         if item.status not in {"draft", "withdrawn"}:
             raise HTTPException(409, "当前状态不能提交审核")
-        if not item.title.strip() or not item.introduction.strip() or not item.cover_image.strip():
-            raise HTTPException(422, "请先补齐标题、简介和封面")
+        route = db.get(Route, arc.route_id)
+        default_introduction, default_cover_image = home_story_defaults(arc, route)
+        item.introduction = item.introduction.strip() or default_introduction
+        item.cover_image = item.cover_image.strip() or default_cover_image
+        if not item.title.strip():
+            raise HTTPException(422, "请先补齐标题")
         item.status = "in_review"
     elif action == "approve":
         if item.status != "in_review":
@@ -2879,8 +2910,14 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
                 arc_id=arc.id,
                 selected_track_id=(str(selected_track_id) if selected_track_id else None),
                 title=str(home_story_data.get("title") or arc.title),
-                introduction=str(home_story_data.get("introduction") or ""),
-                cover_image=str(home_story_data.get("cover_image") or ""),
+                introduction=str(
+                    home_story_data.get("introduction")
+                    or home_story_defaults(arc, route)[0]
+                ),
+                cover_image=str(
+                    home_story_data.get("cover_image")
+                    or home_story_defaults(arc, route)[1]
+                ),
                 selection_weight=int(home_story_data.get("selection_weight") or 1),
                 status=str(home_story_data.get("status") or "draft"),
                 reviewed_by=home_story_data.get("reviewed_by"),

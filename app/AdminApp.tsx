@@ -1261,25 +1261,25 @@ function HomeStoriesWorkspace({
               />
             </label>
             <label className="field">
-              一句话引子
+              一句话引子（可选）
               <textarea
                 rows={3}
                 value={draft.introduction}
                 onChange={(event) =>
                   setDraft({ ...draft, introduction: event.target.value })
                 }
-                placeholder="让人愿意戴上耳机、停留几分钟。"
+                placeholder="留空时自动使用路线副标题"
               />
             </label>
             <div className="form-grid">
               <label className="field">
-                封面资源路径
+                封面资源路径（可选）
                 <input
                   value={draft.cover_image}
                   onChange={(event) =>
                     setDraft({ ...draft, cover_image: event.target.value })
                   }
-                  placeholder="public/content/... 或已登记媒体 URL"
+                  placeholder="留空时自动使用路线封面"
                 />
               </label>
               <label className="field">

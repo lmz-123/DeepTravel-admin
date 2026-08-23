@@ -844,12 +844,16 @@ class FragmentedContentApiTests(unittest.TestCase):
             headers=self.headers,
             json={
                 "title": "城墙听见的故事",
-                "introduction": "给自己两分钟，听一座城慢慢开口。",
-                "cover_image": "images/route.png",
+                "introduction": "",
+                "cover_image": "",
                 "selection_weight": 3,
             },
         )
         self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["publication"]["introduction"], "测试副标题")
+        self.assertEqual(saved.json()["publication"]["cover_image"], "images/route.png")
+        self.assertNotIn("简介为空", saved.json()["blockers"])
+        self.assertNotIn("封面为空", saved.json()["blockers"])
         self.assertIn("尚未选择完整故事音频", saved.json()["blockers"])
 
         profile_id = self.client.get(
