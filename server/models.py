@@ -2,7 +2,19 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Double, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Double,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -17,7 +29,9 @@ class MediaAsset(Base):
     storage_path: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     mime_type: Mapped[str] = mapped_column(String(100))
     storage_provider: Mapped[str] = mapped_column(String(20), default="local")
-    object_key: Mapped[str | None] = mapped_column(String(500), nullable=True, index=True)
+    object_key: Mapped[str | None] = mapped_column(
+        String(500), nullable=True, index=True
+    )
     canonical_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     visibility: Mapped[str] = mapped_column(String(20), default="public")
     size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -31,7 +45,9 @@ class NarrationPreview(Base):
     __tablename__ = "narration_previews"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    fragment_id: Mapped[str] = mapped_column(String(36), ForeignKey("story_fragments.id"), index=True)
+    fragment_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("story_fragments.id"), index=True
+    )
     profile_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("narration_voice_profiles.id"), nullable=True, index=True
     )
@@ -49,7 +65,9 @@ class NarrationPreview(Base):
     metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
-    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class City(Base):
@@ -80,9 +98,15 @@ class Route(Base):
     hero_image: Mapped[str] = mapped_column(String(255))
     is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
     content_status: Mapped[str] = mapped_column(String(40), default="draft")
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    managed_package_id: Mapped[str | None] = mapped_column(String(120), nullable=True, index=True)
-    managed_package_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    managed_package_id: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, index=True
+    )
+    managed_package_version: Mapped[str | None] = mapped_column(
+        String(80), nullable=True
+    )
 
 
 class Stop(Base):
@@ -109,7 +133,9 @@ class Challenge(Base):
     __tablename__ = "challenges"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    stop_id: Mapped[str] = mapped_column(ForeignKey("stops.id"), unique=True, index=True)
+    stop_id: Mapped[str] = mapped_column(
+        ForeignKey("stops.id"), unique=True, index=True
+    )
     prompt: Mapped[str] = mapped_column(Text)
     hint: Mapped[str] = mapped_column(Text)
     options_json: Mapped[list[str]] = mapped_column(JSON)
@@ -156,7 +182,9 @@ class HistoricalClaim(Base):
     boundary_note: Mapped[str] = mapped_column(Text, default="")
     supersedes_claim_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
     reviewed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class ClaimSource(Base):
@@ -182,7 +210,9 @@ class StoryArc(Base):
     review_state: Mapped[str] = mapped_column(String(40), default="in_review")
     field_audit_state: Mapped[str] = mapped_column(String(40), default="required")
     reviewed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     source_version: Mapped[str | None] = mapped_column(String(80), nullable=True)
     publication_decision: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
@@ -238,7 +268,9 @@ class NarrationVoiceProfile(Base):
     is_default: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class FragmentNarrationTrack(Base):
@@ -254,7 +286,9 @@ class FragmentNarrationTrack(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    fragment_id: Mapped[str] = mapped_column(String(36), ForeignKey("story_fragments.id"), index=True)
+    fragment_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("story_fragments.id"), index=True
+    )
     profile_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("narration_voice_profiles.id"), index=True
     )
@@ -266,7 +300,9 @@ class FragmentNarrationTrack(Base):
     checksum_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
     generation_metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class StoryNarrationTrack(Base):
@@ -283,7 +319,9 @@ class StoryNarrationTrack(Base):
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
-    arc_id: Mapped[str] = mapped_column(String(36), ForeignKey("story_arcs.id"), index=True)
+    arc_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("story_arcs.id"), index=True
+    )
     profile_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("narration_voice_profiles.id"), index=True
     )
@@ -297,8 +335,12 @@ class StoryNarrationTrack(Base):
     generation_metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     reviewed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -329,14 +371,195 @@ class HomeStoryPublication(Base):
     selection_weight: Mapped[int] = mapped_column(Integer, default=1)
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     reviewed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
     arc: Mapped[StoryArc] = relationship(back_populates="home_story_publication")
     selected_track: Mapped[StoryNarrationTrack | None] = relationship(
         foreign_keys=[selected_track_id]
+    )
+
+
+class StoryCatalogItem(Base):
+    __tablename__ = "story_catalog_items"
+    __table_args__ = (
+        UniqueConstraint("source_kind", "source_id", name="uq_story_catalog_source"),
+        Index("ix_story_catalog_city_status", "city_id", "status", "published_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    city_id: Mapped[str] = mapped_column(ForeignKey("cities.id"), index=True)
+    source_kind: Mapped[str] = mapped_column(String(30))
+    source_id: Mapped[str] = mapped_column(String(36), index=True)
+    canonical_revision: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(255))
+    summary: Mapped[str] = mapped_column(Text)
+    cover_image: Mapped[str] = mapped_column(String(500), default="")
+    district: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    themes_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    point_ids_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    related_stories_json: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    content_type: Mapped[str] = mapped_column(String(80))
+    place_context: Mapped[str] = mapped_column(Text)
+    observable_detail: Mapped[str] = mapped_column(Text)
+    attention_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sources_json: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    fact_status: Mapped[str] = mapped_column(String(40), default="documented")
+    review_status: Mapped[str] = mapped_column(String(40), default="in_review")
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    reviewed_by: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class StoryCatalogVariant(Base):
+    __tablename__ = "story_catalog_variants"
+    __table_args__ = (
+        UniqueConstraint(
+            "catalog_item_id", "role", name="uq_story_catalog_variant_role"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    catalog_item_id: Mapped[str] = mapped_column(
+        ForeignKey("story_catalog_items.id", ondelete="CASCADE"), index=True
+    )
+    role: Mapped[str] = mapped_column(String(30))
+    source_kind: Mapped[str] = mapped_column(String(30))
+    source_id: Mapped[str] = mapped_column(String(36), index=True)
+    track_kind: Mapped[str] = mapped_column(String(30))
+    track_id: Mapped[str] = mapped_column(String(36), index=True)
+    transcript_hash: Mapped[str] = mapped_column(String(64))
+    script_version: Mapped[str] = mapped_column(String(40))
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class StoryPlacement(Base):
+    __tablename__ = "story_placements"
+    __table_args__ = (
+        UniqueConstraint(
+            "catalog_item_id",
+            "channel",
+            "module_key",
+            "route_id",
+            name="uq_story_catalog_placement",
+        ),
+        Index("ix_story_placement_public", "channel", "module_key", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    catalog_item_id: Mapped[str] = mapped_column(
+        ForeignKey("story_catalog_items.id", ondelete="CASCADE"), index=True
+    )
+    channel: Mapped[str] = mapped_column(String(30), index=True)
+    module_key: Mapped[str | None] = mapped_column(
+        String(80), nullable=True, index=True
+    )
+    route_id: Mapped[str | None] = mapped_column(
+        ForeignKey("routes.id"), nullable=True, index=True
+    )
+    variant_role: Mapped[str] = mapped_column(String(30), default="short_preview")
+    display_order: Mapped[int] = mapped_column(Integer, default=0)
+    weight: Mapped[int] = mapped_column(Integer, default=1)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    starts_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    ends_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RoutePretripGuidance(Base):
+    __tablename__ = "route_pretrip_guidance"
+
+    route_id: Mapped[str] = mapped_column(ForeignKey("routes.id"), primary_key=True)
+    theme_story_catalog_id: Mapped[str | None] = mapped_column(
+        ForeignKey("story_catalog_items.id"), nullable=True, index=True
+    )
+    story_directions_json: Mapped[list[dict]] = mapped_column(JSON, default=list)
+    companion_tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    safety_tips_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    rest_tips_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    accessibility_tips_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    weather_tips_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    offline_roles_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ContentImportPreview(Base):
+    __tablename__ = "content_import_previews"
+    __table_args__ = (
+        Index("ix_content_import_preview_expiry", "status", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    package_id: Mapped[str] = mapped_column(String(120), index=True)
+    package_version: Mapped[str] = mapped_column(String(80))
+    package_checksum: Mapped[str] = mapped_column(String(64))
+    editor_id: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="ready", index=True)
+    plan_json: Mapped[dict] = mapped_column(JSON)
+    target_revisions_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class ContentImportBatch(Base):
+    __tablename__ = "content_import_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "package_id", "package_version", name="uq_content_import_package_version"
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    package_id: Mapped[str] = mapped_column(String(120), index=True)
+    package_version: Mapped[str] = mapped_column(String(80))
+    package_checksum: Mapped[str] = mapped_column(String(64))
+    editor_id: Mapped[str] = mapped_column(String(120), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="completed", index=True)
+    result_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 
@@ -371,7 +594,9 @@ class TriggerRegion(Base):
     cooldown_seconds: Mapped[int] = mapped_column(Integer, default=120)
     audit_state: Mapped[str] = mapped_column(String(40), default="in_review")
     coordinate_system: Mapped[str] = mapped_column(String(20), default="WGS84")
-    source_coordinate_system: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    source_coordinate_system: Mapped[str | None] = mapped_column(
+        String(20), nullable=True
+    )
     coordinate_source: Mapped[str | None] = mapped_column(Text, nullable=True)
     field_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
 

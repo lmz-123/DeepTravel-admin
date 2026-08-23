@@ -32,7 +32,7 @@ test("server-renders the DeepTravel admin application", async () => {
   assert.match(html, /<title>简地内容中台<\/title>/i);
   assert.match(html, /碎片导览/);
   assert.match(html, /运行日志/);
-  assert.match(html, /<span>10<\/span>运行日志/);
+  assert.match(html, /<span>11<\/span>运行日志/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Building your site/i);
 });
 
@@ -47,7 +47,10 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.match(page, /<AdminApp \/>/);
   assert.match(layout, /简地内容中台/);
   assert.match(admin, /"fragmented", "04", "碎片导览"/);
-  assert.match(admin, /"logs", "10", "运行日志"/);
+  assert.match(admin, /"catalog", "06", "城市故事与出发前"/);
+  assert.match(admin, /"logs", "11", "运行日志"/);
+  assert.match(admin, /\/multi-city-import\/preview/);
+  assert.match(admin, /确认写入草稿区/);
   assert.match(admin, /\/fragmented-routes\/import/);
   assert.match(admin, /\/routes\/\$\{routeId\}\/validate/);
   assert.match(admin, /submit-review/);

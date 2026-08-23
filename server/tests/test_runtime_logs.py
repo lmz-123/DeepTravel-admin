@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import tempfile
 import unittest
@@ -9,7 +10,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _TEMP_DIR = tempfile.TemporaryDirectory()
-os.environ["DATABASE_URL"] = f"sqlite+pysqlite:///{Path(_TEMP_DIR.name) / 'runtime-logs.db'}"
+os.environ["DATABASE_URL"] = (
+    f"sqlite+pysqlite:///{Path(_TEMP_DIR.name) / 'runtime-logs.db'}"
+)
 os.environ["ADMIN_TOKEN"] = "admin-test-token"
 os.environ["CLIENT_LOG_INGEST_TOKEN"] = "client-test-token"
 os.environ["MEDIA_ROOT"] = str(Path(_TEMP_DIR.name) / "media")
@@ -32,14 +35,22 @@ from models import (  # noqa: E402
     NarrationVoiceProfile,
     StoryFragment,
 )
-from runtime_logs.docker_source import DockerFrameDecoder, DockerLogSource, parse_docker_line  # noqa: E402
+from runtime_logs.docker_source import (  # noqa: E402
+    DockerFrameDecoder,
+    DockerLogSource,
+    parse_docker_line,
+)
 from runtime_logs.normalization import (  # noqa: E402
     NormalizationLimits,
     normalize_context,
     normalize_event,
     redact_text,
 )
-from runtime_logs.storage import cleanup_client_logs, ensure_client_log_schema, query_client_events  # noqa: E402
+from runtime_logs.storage import (  # noqa: E402
+    cleanup_client_logs,
+    ensure_client_log_schema,
+    query_client_events,
+)
 from runtime_logs.streaming import StreamLimiter, limited_stream, sse_message  # noqa: E402
 from narration import NarrationSynthesisError  # noqa: E402
 
@@ -58,7 +69,10 @@ class NormalizationTests(unittest.TestCase):
         self.assertGreaterEqual(redacted.count("[REDACTED]"), 4)
 
         context = normalize_context(
-            {"token": "private", "nested": {"password": "also-private", "safe": "visible"}},
+            {
+                "token": "private",
+                "nested": {"password": "also-private", "safe": "visible"},
+            },
             NormalizationLimits(),
         )
         self.assertEqual(context["token"], "[REDACTED]")
@@ -141,10 +155,16 @@ class StorageTests(unittest.TestCase):
                 )
             db.commit()
             latest = query_client_events(db, limit=2)
-            self.assertEqual([event.message for event in latest], ["event-2", "event-3"])
-            resumed = query_client_events(db, after_cursor=int(latest[0].cursor), limit=10)
+            self.assertEqual(
+                [event.message for event in latest], ["event-2", "event-3"]
+            )
+            resumed = query_client_events(
+                db, after_cursor=int(latest[0].cursor), limit=10
+            )
             self.assertEqual([event.message for event in resumed], ["event-3"])
-            removed = cleanup_client_logs(db, retention_days=7, max_rows=2, batch_size=10, now=now)
+            removed = cleanup_client_logs(
+                db, retention_days=7, max_rows=2, batch_size=10, now=now
+            )
             db.commit()
             self.assertEqual(removed, 2)
             self.assertEqual(len(query_client_events(db, limit=10)), 2)
@@ -174,9 +194,7 @@ class ContentSchemaTests(unittest.TestCase):
             column["name"] for column in inspect(database).get_columns("photo_missions")
         }
         self.assertTrue(
-            {"vantage_point", "shooting_direction", "composition_tip"}.issubset(
-                columns
-            )
+            {"vantage_point", "shooting_direction", "composition_tip"}.issubset(columns)
         )
         with database.connect() as connection:
             row = connection.execute(
@@ -255,42 +273,217 @@ class FragmentedContentApiTests(unittest.TestCase):
             "package_id": "route-package-test",
             "package_version": version,
             "media": [
-                {"key": "cover", "storage_path": "images/route.png", "mime_type": "image/png"},
-                {"key": "audio-one", "storage_path": "audio/one.m4a", "mime_type": "audio/mp4"},
-                {"key": "audio-two", "storage_path": "audio/two.m4a", "mime_type": "audio/mp4"},
+                {
+                    "key": "cover",
+                    "storage_path": "images/route.png",
+                    "mime_type": "image/png",
+                },
+                {
+                    "key": "audio-one",
+                    "storage_path": "audio/one.m4a",
+                    "mime_type": "audio/mp4",
+                },
+                {
+                    "key": "audio-two",
+                    "storage_path": "audio/two.m4a",
+                    "mime_type": "audio/mp4",
+                },
             ],
-            "city": {"id": "city-test", "slug": "test-city", "name": "测试城", "subtitle": "测试", "hero_image": "images/route.png", "latitude": 22.5, "longitude": 114.0},
-            "route": {"id": "route-test", "slug": "route-test", "title": "测试路线", "subtitle": "测试副标题", "description": "测试说明", "duration_minutes": 30, "distance_km": 1.0, "difficulty": "轻松", "theme": "测试", "hero_image": "images/route.png", "is_featured": False},
-            "story_arc": {"id": "arc-test", "title": "完整故事", "central_question": "发生了什么？", "complete_story": "第一件事带来了第二件事。", "causal_model": [{"id": "cause-one", "text": "第一件事发生"}, {"id": "cause-two", "text": "第二件事发生"}], "pronunciation_notes": [], "script_version": version, "review_state": "reviewed", "field_audit_state": "reviewed", "reviewed_by": "tester", "reviewed_at": "2026-08-22T00:00:00Z", "source_version": "source-v1", "publication_decision": None},
-            "sources": [{"id": "source-test", "title": "官方资料", "publisher": "测试机构", "url": "https://example.com/source", "source_type": "government", "accessed_at": "2026-08-22T00:00:00Z", "review_state": "reviewed", "summary": "支持测试主张"}],
+            "city": {
+                "id": "city-test",
+                "slug": "test-city",
+                "name": "测试城",
+                "subtitle": "测试",
+                "hero_image": "images/route.png",
+                "latitude": 22.5,
+                "longitude": 114.0,
+            },
+            "route": {
+                "id": "route-test",
+                "slug": "route-test",
+                "title": "测试路线",
+                "subtitle": "测试副标题",
+                "description": "测试说明",
+                "duration_minutes": 30,
+                "distance_km": 1.0,
+                "difficulty": "轻松",
+                "theme": "测试",
+                "hero_image": "images/route.png",
+                "is_featured": False,
+            },
+            "story_arc": {
+                "id": "arc-test",
+                "title": "完整故事",
+                "central_question": "发生了什么？",
+                "complete_story": "第一件事带来了第二件事。",
+                "causal_model": [
+                    {"id": "cause-one", "text": "第一件事发生"},
+                    {"id": "cause-two", "text": "第二件事发生"},
+                ],
+                "pronunciation_notes": [],
+                "script_version": version,
+                "review_state": "reviewed",
+                "field_audit_state": "reviewed",
+                "reviewed_by": "tester",
+                "reviewed_at": "2026-08-22T00:00:00Z",
+                "source_version": "source-v1",
+                "publication_decision": None,
+            },
+            "sources": [
+                {
+                    "id": "source-test",
+                    "title": "官方资料",
+                    "publisher": "测试机构",
+                    "url": "https://example.com/source",
+                    "source_type": "government",
+                    "accessed_at": "2026-08-22T00:00:00Z",
+                    "review_state": "reviewed",
+                    "summary": "支持测试主张",
+                }
+            ],
             "claims": [
-                {"id": "claim-one", "canonical_text": "第一件事存在", "claim_kind": "fact", "certainty": "documented", "review_state": "reviewed", "boundary_note": "", "supersedes_claim_id": None, "reviewed_by": "tester", "reviewed_at": "2026-08-22T00:00:00Z", "source_ids": ["source-test"], "support_notes": {"source-test": "直接支持"}},
-                {"id": "claim-two", "canonical_text": "第二件事存在", "claim_kind": "fact", "certainty": "documented", "review_state": "reviewed", "boundary_note": "", "supersedes_claim_id": None, "reviewed_by": "tester", "reviewed_at": "2026-08-22T00:00:00Z", "source_ids": ["source-test"], "support_notes": {"source-test": "直接支持"}},
+                {
+                    "id": "claim-one",
+                    "canonical_text": "第一件事存在",
+                    "claim_kind": "fact",
+                    "certainty": "documented",
+                    "review_state": "reviewed",
+                    "boundary_note": "",
+                    "supersedes_claim_id": None,
+                    "reviewed_by": "tester",
+                    "reviewed_at": "2026-08-22T00:00:00Z",
+                    "source_ids": ["source-test"],
+                    "support_notes": {"source-test": "直接支持"},
+                },
+                {
+                    "id": "claim-two",
+                    "canonical_text": "第二件事存在",
+                    "claim_kind": "fact",
+                    "certainty": "documented",
+                    "review_state": "reviewed",
+                    "boundary_note": "",
+                    "supersedes_claim_id": None,
+                    "reviewed_by": "tester",
+                    "reviewed_at": "2026-08-22T00:00:00Z",
+                    "source_ids": ["source-test"],
+                    "support_notes": {"source-test": "直接支持"},
+                },
             ],
             "required_photo_mission_count": 0,
             "fragments": [
-                self.fragment("fragment-one", 1, "audio/one.m4a", "claim-one", 22.5000, 114.0000, [], True),
-                self.fragment("fragment-two", 2, "audio/two.m4a", "claim-two", 22.5030, 114.0030, ["fragment-one"], False),
+                self.fragment(
+                    "fragment-one",
+                    1,
+                    "audio/one.m4a",
+                    "claim-one",
+                    22.5000,
+                    114.0000,
+                    [],
+                    True,
+                ),
+                self.fragment(
+                    "fragment-two",
+                    2,
+                    "audio/two.m4a",
+                    "claim-two",
+                    22.5030,
+                    114.0030,
+                    ["fragment-one"],
+                    False,
+                ),
             ],
         }
 
-    def fragment(self, identity, position, audio, claim, latitude, longitude, dependencies, mission):
+    def fragment(
+        self,
+        identity,
+        position,
+        audio,
+        claim,
+        latitude,
+        longitude,
+        dependencies,
+        mission,
+    ):
         script = f"第 {position} 段经过审核的旁白。"
-        value = {"id": identity, "position": position, "title": f"线索 {position}", "safe_preview": "请继续前行", "experience_tags": [" 安静 ", "安静", f"未来标签 {position}"], "narration_script": script, "transcript": script, "audio_path": audio, "audio_mime_type": "audio/mp4", "audio_size_bytes": 9, "script_version": "test-v1", "interaction_type": "photo" if mission else "passive", "completion_threshold": 0.9, "key_claim": "经过来源支持的主张", "answers_question": "回答前一问", "raises_question": "提出下一问", "authenticity_label": "documented", "review_state": "reviewed", "dependency_ids": dependencies, "claim_ids": [claim], "trigger_region": {"id": f"trigger-{position}", "latitude": latitude, "longitude": longitude, "entry_radius_m": 50, "exit_radius_m": 85, "max_accuracy_m": 35, "qualifying_samples": 2, "sample_window_seconds": 15, "cooldown_seconds": 120, "audit_state": "reviewed", "coordinate_system": "WGS84", "source_coordinate_system": "WGS84", "coordinate_source": "现场 GPS 复核", "field_notes": "公共步行区域"}}
+        value = {
+            "id": identity,
+            "position": position,
+            "title": f"线索 {position}",
+            "safe_preview": "请继续前行",
+            "experience_tags": [" 安静 ", "安静", f"未来标签 {position}"],
+            "narration_script": script,
+            "transcript": script,
+            "audio_path": audio,
+            "audio_mime_type": "audio/mp4",
+            "audio_size_bytes": 9,
+            "script_version": "test-v1",
+            "interaction_type": "photo" if mission else "passive",
+            "completion_threshold": 0.9,
+            "key_claim": "经过来源支持的主张",
+            "answers_question": "回答前一问",
+            "raises_question": "提出下一问",
+            "authenticity_label": "documented",
+            "review_state": "reviewed",
+            "dependency_ids": dependencies,
+            "claim_ids": [claim],
+            "trigger_region": {
+                "id": f"trigger-{position}",
+                "latitude": latitude,
+                "longitude": longitude,
+                "entry_radius_m": 50,
+                "exit_radius_m": 85,
+                "max_accuracy_m": 35,
+                "qualifying_samples": 2,
+                "sample_window_seconds": 15,
+                "cooldown_seconds": 120,
+                "audit_state": "reviewed",
+                "coordinate_system": "WGS84",
+                "source_coordinate_system": "WGS84",
+                "coordinate_source": "现场 GPS 复核",
+                "field_notes": "公共步行区域",
+            },
+        }
         if mission:
-            value["photo_mission"] = {"id": "mission-one", "prompt": "拍摄现场标志", "field_subject": "公共标志", "vantage_point": "站在公共步道内侧的导览牌旁", "shooting_direction": "朝向现场标志正面", "composition_tip": "保留标志与周边环境，主体置于画面中央", "safety_copy": "请勿进入车道", "accessibility_alternative": "可拍摄邻近导览牌", "authenticity_label": "documented", "required": False, "audit_state": "reviewed"}
+            value["photo_mission"] = {
+                "id": "mission-one",
+                "prompt": "拍摄现场标志",
+                "field_subject": "公共标志",
+                "vantage_point": "站在公共步道内侧的导览牌旁",
+                "shooting_direction": "朝向现场标志正面",
+                "composition_tip": "保留标志与周边环境，主体置于画面中央",
+                "safety_copy": "请勿进入车道",
+                "accessibility_alternative": "可拍摄邻近导览牌",
+                "authenticity_label": "documented",
+                "required": False,
+                "audit_state": "reviewed",
+            }
         return value
 
     def test_import_validate_publish_idempotency_and_version_lock(self):
-        unauthorized = self.client.post("/api/admin/fragmented-routes/import", json=self.payload())
+        unauthorized = self.client.post(
+            "/api/admin/fragmented-routes/import", json=self.payload()
+        )
         self.assertEqual(unauthorized.status_code, 401)
 
         now = datetime.now(UTC)
         with main.SessionLocal() as db:
-            db.add(MediaAsset(key="legacy-cover", storage_path="images/route.png", mime_type="image/png", created_at=now, updated_at=now))
+            db.add(
+                MediaAsset(
+                    key="legacy-cover",
+                    storage_path="images/route.png",
+                    mime_type="image/png",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
             db.commit()
 
-        imported = self.client.post("/api/admin/fragmented-routes/import", headers=self.headers, json=self.payload())
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
+        )
         self.assertEqual(imported.status_code, 201, imported.text)
         self.assertTrue(imported.json()["validation"]["valid"], imported.text)
         self.assertIsNone(imported.json()["route"]["published_at"])
@@ -377,30 +570,46 @@ class FragmentedContentApiTests(unittest.TestCase):
         )
         self.assertEqual(protected_media.status_code, 409, protected_media.text)
 
-        repeated = self.client.post("/api/admin/fragmented-routes/import", headers=self.headers, json=self.payload())
+        repeated = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
+        )
         self.assertEqual(repeated.status_code, 201, repeated.text)
         self.assertTrue(repeated.json()["idempotent"])
 
-        submitted = self.client.post("/api/admin/routes/route-test/submit-review", headers=self.headers)
+        submitted = self.client.post(
+            "/api/admin/routes/route-test/submit-review", headers=self.headers
+        )
         self.assertEqual(submitted.status_code, 200, submitted.text)
         self.assertEqual(submitted.json()["route"]["content_status"], "in_review")
-        verified = self.client.post("/api/admin/routes/route-test/verify", headers=self.headers)
+        verified = self.client.post(
+            "/api/admin/routes/route-test/verify", headers=self.headers
+        )
         self.assertEqual(verified.status_code, 200, verified.text)
         self.assertEqual(verified.json()["route"]["content_status"], "verified")
         self.assertFalse(verified.json()["route"]["is_public_visible"])
-        published = self.client.post("/api/admin/routes/route-test/publish", headers=self.headers)
+        published = self.client.post(
+            "/api/admin/routes/route-test/publish", headers=self.headers
+        )
         self.assertEqual(published.status_code, 200, published.text)
         self.assertTrue(published.json()["validation"]["valid"])
         self.assertTrue(published.json()["route"]["is_public_visible"])
-        invalid_repeat = self.client.post("/api/admin/routes/route-test/publish", headers=self.headers)
+        invalid_repeat = self.client.post(
+            "/api/admin/routes/route-test/publish", headers=self.headers
+        )
         self.assertEqual(invalid_repeat.status_code, 409)
 
         with main.SessionLocal() as db:
             db.add(Journey(id="journey-test", route_id="route-test", status="active"))
             db.commit()
-        graph = self.client.get("/api/admin/routes/route-test/content", headers=self.headers).json()
+        graph = self.client.get(
+            "/api/admin/routes/route-test/content", headers=self.headers
+        ).json()
         graph["fragments"][0]["experience_tags"] = ["试图绕过发布锁"]
-        locked = self.client.put("/api/admin/routes/route-test/content", headers=self.headers, json=graph)
+        locked = self.client.put(
+            "/api/admin/routes/route-test/content", headers=self.headers, json=graph
+        )
         self.assertEqual(locked.status_code, 409, locked.text)
 
     def test_legacy_stop_tags_normalize_and_invalid_update_does_not_mutate(self):
@@ -455,9 +664,7 @@ class FragmentedContentApiTests(unittest.TestCase):
             "/api/admin/stops", headers=self.headers, json=payload
         )
         self.assertEqual(created.status_code, 201, created.text)
-        self.assertEqual(
-            created.json()["experience_tags"], ["老建筑", "未来新标签"]
-        )
+        self.assertEqual(created.json()["experience_tags"], ["老建筑", "未来新标签"])
 
         invalid = dict(payload)
         invalid["experience_tags"] = [f"标签-{index}" for index in range(9)]
@@ -480,12 +687,18 @@ class FragmentedContentApiTests(unittest.TestCase):
         payload["route"]["id"] = "invalid-route"
         payload["route"]["slug"] = "invalid-route"
         payload["fragments"][0]["audio_path"] = "audio/not-registered.m4a"
-        imported = self.client.post("/api/admin/fragmented-routes/import", headers=self.headers, json=payload)
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import", headers=self.headers, json=payload
+        )
         self.assertEqual(imported.status_code, 201, imported.text)
         self.assertFalse(imported.json()["validation"]["valid"])
-        submitted = self.client.post("/api/admin/routes/invalid-route/submit-review", headers=self.headers)
+        submitted = self.client.post(
+            "/api/admin/routes/invalid-route/submit-review", headers=self.headers
+        )
         self.assertEqual(submitted.status_code, 200, submitted.text)
-        verified = self.client.post("/api/admin/routes/invalid-route/verify", headers=self.headers)
+        verified = self.client.post(
+            "/api/admin/routes/invalid-route/verify", headers=self.headers
+        )
         self.assertEqual(verified.status_code, 422, verified.text)
 
     def test_validation_rejects_missing_photo_guidance_with_field_paths(self):
@@ -584,14 +797,22 @@ class FragmentedContentApiTests(unittest.TestCase):
         )
 
     def test_three_narration_previews_do_not_bind_until_approval(self):
-        imported = self.client.post("/api/admin/fragmented-routes/import", headers=self.headers, json=self.payload())
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
+        )
         self.assertEqual(imported.status_code, 201, imported.text)
-        before = self.client.get("/api/admin/routes/route-test/content", headers=self.headers).json()
+        before = self.client.get(
+            "/api/admin/routes/route-test/content", headers=self.headers
+        ).json()
         old_audio = before["fragments"][0]["audio_path"]
 
         config = self.client.get("/api/admin/narration/config", headers=self.headers)
         self.assertEqual(config.status_code, 200, config.text)
-        self.assertEqual(config.json()["default_voice_id"], main.settings.minimax_voice_id)
+        self.assertEqual(
+            config.json()["default_voice_id"], main.settings.minimax_voice_id
+        )
         self.assertTrue(config.json()["credentials_configured"])
         self.assertEqual(len(config.json()["presets"]), 3)
 
@@ -600,9 +821,27 @@ class FragmentedContentApiTests(unittest.TestCase):
             headers=self.headers,
             json={
                 "variants": [
-                    {"label": "A", "voice_id": "voice-field-test", "emotion": "neutral", "speed": 0.91, "pitch": -2},
-                    {"label": "B", "voice_id": "voice-field-test", "emotion": "happy", "speed": 1.01, "pitch": 0},
-                    {"label": "C", "voice_id": "voice-field-test", "emotion": "surprised", "speed": 0.96, "pitch": 2},
+                    {
+                        "label": "A",
+                        "voice_id": "voice-field-test",
+                        "emotion": "neutral",
+                        "speed": 0.91,
+                        "pitch": -2,
+                    },
+                    {
+                        "label": "B",
+                        "voice_id": "voice-field-test",
+                        "emotion": "happy",
+                        "speed": 1.01,
+                        "pitch": 0,
+                    },
+                    {
+                        "label": "C",
+                        "voice_id": "voice-field-test",
+                        "emotion": "surprised",
+                        "speed": 0.96,
+                        "pitch": 2,
+                    },
                 ]
             },
         )
@@ -610,21 +849,35 @@ class FragmentedContentApiTests(unittest.TestCase):
         previews = generated.json()["previews"]
         self.assertEqual(len(previews), 3)
         self.assertTrue(all(item["status"] == "ready" for item in previews))
-        self.assertTrue(all(item["voice_id"] == "voice-field-test" for item in previews))
-        self.assertEqual([item["emotion"] for item in previews], ["neutral", "happy", "surprised"])
+        self.assertTrue(
+            all(item["voice_id"] == "voice-field-test" for item in previews)
+        )
+        self.assertEqual(
+            [item["emotion"] for item in previews], ["neutral", "happy", "surprised"]
+        )
         self.assertEqual([item["pitch"] for item in previews], [-2, 0, 2])
-        unchanged = self.client.get("/api/admin/routes/route-test/content", headers=self.headers).json()
+        unchanged = self.client.get(
+            "/api/admin/routes/route-test/content", headers=self.headers
+        ).json()
         self.assertEqual(unchanged["fragments"][0]["audio_path"], old_audio)
 
-        audio = self.client.get(f"/api/admin{previews[0]['playback_path']}", headers=self.headers)
+        audio = self.client.get(
+            f"/api/admin{previews[0]['playback_path']}", headers=self.headers
+        )
         self.assertEqual(audio.status_code, 200)
         approved = self.client.post(
             f"/api/admin/narration/previews/{previews[0]['id']}/approve",
             headers=self.headers,
         )
         self.assertEqual(approved.status_code, 200, approved.text)
-        changed = self.client.get("/api/admin/routes/route-test/content", headers=self.headers).json()
-        self.assertTrue(changed["fragments"][0]["audio_path"].startswith("public/narration/fragment-one/"))
+        changed = self.client.get(
+            "/api/admin/routes/route-test/content", headers=self.headers
+        ).json()
+        self.assertTrue(
+            changed["fragments"][0]["audio_path"].startswith(
+                "public/narration/fragment-one/"
+            )
+        )
 
     def test_stale_narration_preview_cannot_replace_current_script(self):
         imported = self.client.post(
@@ -650,14 +903,20 @@ class FragmentedContentApiTests(unittest.TestCase):
         )
         self.assertEqual(rejected.status_code, 409, rejected.text)
 
-    def test_voice_profile_requires_complete_coverage_and_never_overwrites_default(self):
+    def test_voice_profile_requires_complete_coverage_and_never_overwrites_default(
+        self,
+    ):
         imported = self.client.post(
             "/api/admin/fragmented-routes/import",
             headers=self.headers,
             json=self.payload(),
         )
         self.assertEqual(imported.status_code, 201, imported.text)
-        original_audio = imported.json()["graph"]["fragments"][0]["audio_path"] if "graph" in imported.json() else "audio/one.m4a"
+        original_audio = (
+            imported.json()["graph"]["fragments"][0]["audio_path"]
+            if "graph" in imported.json()
+            else "audio/one.m4a"
+        )
 
         created = self.client.post(
             "/api/admin/narration/profiles",
@@ -679,7 +938,10 @@ class FragmentedContentApiTests(unittest.TestCase):
             headers=self.headers,
         ).json()
         self.assertFalse(coverage["ready"])
-        self.assertEqual([item["id"] for item in coverage["missing"]], ["fragment-one", "fragment-two"])
+        self.assertEqual(
+            [item["id"] for item in coverage["missing"]],
+            ["fragment-one", "fragment-two"],
+        )
         rejected = self.client.post(
             f"/api/admin/narration/profiles/{profile['id']}/publish",
             headers=self.headers,
@@ -723,7 +985,9 @@ class FragmentedContentApiTests(unittest.TestCase):
         )
         self.assertEqual(published.status_code, 200, published.text)
         with main.SessionLocal() as db:
-            rows = list(db.query(FragmentNarrationTrack).filter_by(profile_id=profile["id"]))
+            rows = list(
+                db.query(FragmentNarrationTrack).filter_by(profile_id=profile["id"])
+            )
             self.assertEqual(len(rows), 2)
             self.assertTrue(all(row.published_at is not None for row in rows))
             self.assertTrue(db.get(NarrationVoiceProfile, profile["id"]) is not None)
@@ -802,7 +1066,9 @@ class FragmentedContentApiTests(unittest.TestCase):
 
     def test_route_batch_generates_formal_tracks_and_retries_only_failed_nodes(self):
         imported = self.client.post(
-            "/api/admin/fragmented-routes/import", headers=self.headers, json=self.payload()
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
         )
         self.assertEqual(imported.status_code, 201, imported.text)
         created = self.client.post(
@@ -841,7 +1107,11 @@ class FragmentedContentApiTests(unittest.TestCase):
         self.assertEqual(partial.json()["failed_count"], 1)
         self.assertFalse(partial.json()["coverage"]["ready"])
         self.assertEqual(
-            [item["fragment_id"] for item in partial.json()["results"] if item["status"] == "failed"],
+            [
+                item["fragment_id"]
+                for item in partial.json()["results"]
+                if item["status"] == "failed"
+            ],
             ["fragment-two"],
         )
 
@@ -861,7 +1131,9 @@ class FragmentedContentApiTests(unittest.TestCase):
                 db.query(FragmentNarrationTrack).filter_by(profile_id=profile_id)
             )
             self.assertEqual(len(tracks), 2)
-            self.assertTrue(all("/route-batch-voice/" in row.media_path for row in tracks))
+            self.assertTrue(
+                all("/route-batch-voice/" in row.media_path for row in tracks)
+            )
 
     def test_same_checksum_assets_share_object_without_unsafe_deletion(self):
         first = self.client.post(
@@ -892,13 +1164,9 @@ class FragmentedContentApiTests(unittest.TestCase):
             )
             db.commit()
 
-        deleted = self.client.delete(
-            "/api/admin/media/shared-a", headers=self.headers
-        )
+        deleted = self.client.delete("/api/admin/media/shared-a", headers=self.headers)
         self.assertEqual(deleted.status_code, 204, deleted.text)
-        surviving = self.client.get(
-            "/api/admin/media", headers=self.headers
-        ).json()
+        surviving = self.client.get("/api/admin/media", headers=self.headers).json()
         shared_b = next(item for item in surviving if item["key"] == "shared-b")
         object_path = Path(_TEMP_DIR.name) / "media" / shared_b["object_key"]
         self.assertTrue(object_path.is_file())
@@ -910,7 +1178,9 @@ class FragmentedContentApiTests(unittest.TestCase):
             json=self.payload(),
         )
         self.assertEqual(imported.status_code, 201, imported.text)
-        self.client.post("/api/admin/routes/route-test/submit-review", headers=self.headers)
+        self.client.post(
+            "/api/admin/routes/route-test/submit-review", headers=self.headers
+        )
         self.client.post("/api/admin/routes/route-test/verify", headers=self.headers)
         published_route = self.client.post(
             "/api/admin/routes/route-test/publish", headers=self.headers
@@ -978,11 +1248,197 @@ class FragmentedContentApiTests(unittest.TestCase):
             arc = db.get(main.StoryArc, "arc-test")
             arc.complete_story = "正文已经更新，旧音频不应再次发布。"
             db.commit()
-        stale = self.client.get(
-            "/api/admin/home-stories", headers=self.headers
-        ).json()[0]
+        stale = self.client.get("/api/admin/home-stories", headers=self.headers).json()[
+            0
+        ]
         self.assertFalse(stale["tracks"][0]["is_current"])
         self.assertIn("已选音频与当前正文不一致，请重新生成", stale["blockers"])
+
+    def test_city_story_catalog_uses_canonical_source_and_fixed_home_module(self):
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
+        )
+        self.assertEqual(imported.status_code, 201, imported.text)
+        with main.SessionLocal() as db:
+            fragment = db.get(StoryFragment, "fragment-one")
+            profile = NarrationVoiceProfile(
+                id="catalog-profile",
+                slug="catalog-profile",
+                display_name="目录测试音色",
+                description="",
+                provider="fake",
+                model="fake",
+                voice_id="fake",
+                emotion="neutral",
+                speed=1.0,
+                pitch=0,
+                display_order=0,
+                status="published",
+                is_default=False,
+                created_at=datetime.now(UTC),
+                updated_at=datetime.now(UTC),
+                published_at=datetime.now(UTC),
+            )
+            track_id = "catalog-track"
+            db.add(profile)
+            db.add(
+                FragmentNarrationTrack(
+                    id=track_id,
+                    fragment_id=fragment.id,
+                    profile_id=profile.id,
+                    transcript_hash=hashlib.sha256(
+                        fragment.narration_script.strip().encode()
+                    ).hexdigest(),
+                    script_version=fragment.script_version,
+                    media_path=fragment.audio_path,
+                    mime_type=fragment.audio_mime_type,
+                    size_bytes=fragment.audio_size_bytes,
+                    checksum_sha256=None,
+                    generation_metadata_json={"source": "test"},
+                    approved_at=datetime.now(UTC),
+                    published_at=datetime.now(UTC),
+                )
+            )
+            db.commit()
+
+        created = self.client.post(
+            "/api/admin/story-catalog",
+            headers=self.headers,
+            json={
+                "city_id": "city-test",
+                "source_kind": "story_fragment",
+                "source_id": "fragment-one",
+                "title": "一段街角故事",
+                "summary": "三分钟认识一个现场细节",
+                "cover_image": "images/route.png",
+                "content_type": "未来新增类型",
+                "themes": ["未来主题"],
+                "place_context": "测试城的一处公共街角",
+                "observable_detail": "墙面的旧砖尺寸并不相同",
+                "attention_hint": "可以留意转角处的砖缝",
+                "sources": [{"title": "官方资料", "status": "documented"}],
+                "variants": [{"role": "short_preview", "track_id": track_id}],
+                "placements": [
+                    {
+                        "channel": "home",
+                        "module_key": "today_city_story",
+                        "display_order": 0,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        body = created.json()
+        self.assertEqual(body["content_type"], "未来新增类型")
+        self.assertEqual(body["themes"], ["未来主题"])
+        self.assertNotIn("audio_path", body)
+        self.assertEqual(body["source"]["source_id"], "fragment-one")
+
+        item_id = body["id"]
+        for action, expected in (
+            ("submit-review", "in_review"),
+            ("verify", "verified"),
+            ("publish", "published"),
+        ):
+            transitioned = self.client.post(
+                f"/api/admin/story-catalog/{item_id}/{action}", headers=self.headers
+            )
+            self.assertEqual(transitioned.status_code, 200, transitioned.text)
+            self.assertEqual(transitioned.json()["status"], expected)
+
+        preview = self.client.get(
+            "/api/admin/cities/city-test/home-story-preview", headers=self.headers
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(len(preview.json()["modules"]), 5)
+        self.assertEqual(preview.json()["modules"][0]["items"][0]["id"], item_id)
+
+    def test_multi_city_import_requires_preview_then_writes_draft_atomically(self):
+        package = {
+            "schema_version": "1.0",
+            "package_id": "multi-city-test",
+            "package_version": "1",
+            "entities": {
+                "cities": [
+                    {
+                        "id": "city-imported",
+                        "slug": "imported-city",
+                        "name": "导入城市",
+                        "subtitle": "预检后写入",
+                        "hero_image": "images/route.png",
+                        "latitude": 30.0,
+                        "longitude": 120.0,
+                    }
+                ],
+                "routes": [],
+                "stops": [],
+                "story_arcs": [],
+                "story_fragments": [],
+                "catalog_items": [],
+                "variants": [],
+                "placements": [],
+                "pretrip_guidance": [],
+                "media": [],
+            },
+        }
+        preview = self.client.post(
+            "/api/admin/multi-city-import/preview",
+            headers=self.headers,
+            files={"file": ("package.json", json.dumps(package), "application/json")},
+        )
+        self.assertEqual(preview.status_code, 201, preview.text)
+        self.assertTrue(preview.json()["can_confirm"])
+        self.assertEqual(preview.json()["counts"]["new"], 1)
+        with main.SessionLocal() as db:
+            self.assertIsNone(db.get(main.City, "city-imported"))
+
+        confirmed = self.client.post(
+            "/api/admin/multi-city-import/confirm",
+            headers=self.headers,
+            json={"confirmation_token": preview.json()["confirmation_token"]},
+        )
+        self.assertEqual(confirmed.status_code, 200, confirmed.text)
+        with main.SessionLocal() as db:
+            self.assertEqual(db.get(main.City, "city-imported").name, "导入城市")
+
+        replay_preview = self.client.post(
+            "/api/admin/multi-city-import/preview",
+            headers=self.headers,
+            files={"file": ("package.json", json.dumps(package), "application/json")},
+        )
+        self.assertEqual(replay_preview.status_code, 201, replay_preview.text)
+        replay = self.client.post(
+            "/api/admin/multi-city-import/confirm",
+            headers=self.headers,
+            json={"confirmation_token": replay_preview.json()["confirmation_token"]},
+        )
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+
+    def test_multi_city_preview_reports_json_pointer_without_content_writes(self):
+        invalid = {
+            "schema_version": "1.0",
+            "package_id": "invalid-media",
+            "package_version": "1",
+            "entities": {
+                "cities": [],
+                "routes": [{"id": "route-missing-city", "city_id": "missing"}],
+                "media": [{"key": "not-uploaded"}],
+            },
+        }
+        response = self.client.post(
+            "/api/admin/multi-city-import/preview",
+            headers=self.headers,
+            files={"file": ("package.json", json.dumps(invalid), "application/json")},
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertFalse(response.json()["can_confirm"])
+        paths = {item["path"] for item in response.json()["problems"]}
+        self.assertIn("/entities/routes/0/city_id", paths)
+        self.assertIn("/entities/media/0/key", paths)
+        self.assertIsNone(response.json()["confirmation_token"])
 
 
 class RuntimeLogApiTests(unittest.TestCase):
@@ -1014,7 +1470,10 @@ class RuntimeLogApiTests(unittest.TestCase):
                     "app_version": "1.0.0+1",
                     "platform": "android",
                     "source": "deeptravel-flutter",
-                    "context": {"endpoint": "/cities", "authorization": "Bearer private"},
+                    "context": {
+                        "endpoint": "/cities",
+                        "authorization": "Bearer private",
+                    },
                 }
             ]
         }
@@ -1049,7 +1508,10 @@ class RuntimeLogApiTests(unittest.TestCase):
             f"/api/admin/logs/client/history?after={first_cursor}",
             headers={"Authorization": "Bearer admin-test-token"},
         )
-        self.assertEqual([event["message"] for event in resumed.json()["events"]], ["audio service warning"])
+        self.assertEqual(
+            [event["message"] for event in resumed.json()["events"]],
+            ["audio service warning"],
+        )
 
     def test_auth_validation_size_and_unknown_source(self):
         invalid = self.client.post(
@@ -1068,7 +1530,10 @@ class RuntimeLogApiTests(unittest.TestCase):
 
         oversized = self.client.post(
             "/api/runtime/client-logs",
-            headers={"X-Client-Log-Token": "client-test-token", "Content-Length": "999999"},
+            headers={
+                "X-Client-Log-Token": "client-test-token",
+                "Content-Length": "999999",
+            },
             content=b"{}",
         )
         self.assertEqual(oversized.status_code, 413)

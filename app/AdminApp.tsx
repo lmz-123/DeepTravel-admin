@@ -17,6 +17,7 @@ type Tab =
   | "routes"
   | "fragmented"
   | "stories"
+  | "catalog"
   | "stops"
   | "challenges"
   | "media"
@@ -215,6 +216,50 @@ type HomeStoryView = {
   blockers: string[];
   ready_to_publish: boolean;
 };
+type StoryCatalogView = {
+  id: string;
+  city_id: string;
+  source_kind: string;
+  source_id: string;
+  title: string;
+  summary: string;
+  cover_image: string;
+  district?: string | null;
+  themes: string[];
+  point_ids: string[];
+  related_stories: Data[];
+  content_type: string;
+  place_context: string;
+  observable_detail: string;
+  attention_hint?: string | null;
+  sources: Data[];
+  fact_status: string;
+  review_status: string;
+  status: string;
+  version: number;
+  source: Data;
+  variants: Data[];
+  placements: Data[];
+  warnings: string[];
+  blockers: string[];
+  ready_to_publish: boolean;
+};
+type ImportPreview = {
+  preview_id: string;
+  confirmation_token?: string | null;
+  expires_at: string;
+  counts: Record<string, number>;
+  changes: Array<{
+    entity: string;
+    id: string;
+    status: string;
+    path: string;
+    changed_fields: string[];
+    problems: ValidationIssue[];
+  }>;
+  problems: ValidationIssue[];
+  can_confirm: boolean;
+};
 
 const navItems: Array<[Tab, string, string]> = [
   ["dashboard", "01", "总览"],
@@ -222,11 +267,12 @@ const navItems: Array<[Tab, string, string]> = [
   ["routes", "03", "路线"],
   ["fragmented", "04", "碎片导览"],
   ["stories", "05", "首页听故事"],
-  ["stops", "06", "站点与故事"],
-  ["challenges", "07", "题目"],
-  ["media", "08", "媒体库"],
-  ["import", "09", "批量导入"],
-  ["logs", "10", "运行日志"],
+  ["catalog", "06", "城市故事与出发前"],
+  ["stops", "07", "站点与故事"],
+  ["challenges", "08", "题目"],
+  ["media", "09", "媒体库"],
+  ["import", "10", "批量导入"],
+  ["logs", "11", "运行日志"],
 ];
 const titles: Record<Tab, [string, string]> = {
   dashboard: ["内容总览", "CONTENT OPERATIONS"],
@@ -234,6 +280,7 @@ const titles: Record<Tab, [string, string]> = {
   routes: ["路线管理", "CURATED ROUTES"],
   fragmented: ["碎片导览配置", "FRAGMENTED AUDIO ROUTES"],
   stories: ["首页听故事", "CURATED STORY LISTENING"],
+  catalog: ["城市故事与出发前", "CITY STORY DISTRIBUTION"],
   stops: ["站点与故事", "STORIES & PLACES"],
   challenges: ["问题管理", "CHALLENGES"],
   media: ["媒体资源", "MEDIA LIBRARY"],
@@ -570,6 +617,14 @@ export default function AdminApp() {
             )}
             {active === "stories" && (
               <HomeStoriesWorkspace request={request} setNotice={setNotice} />
+            )}
+            {active === "catalog" && (
+              <CityStoryCatalogWorkspace
+                cities={cities}
+                routes={routes}
+                request={request}
+                setNotice={setNotice}
+              />
             )}
             {active === "stops" && (
               <StopsView
@@ -2792,6 +2847,263 @@ function IssueList({
   );
 }
 
+function CityStoryCatalogWorkspace({
+  cities,
+  routes,
+  request,
+  setNotice,
+}: {
+  cities: City[];
+  routes: Route[];
+  request: <T>(p: string, i?: RequestInit) => Promise<T>;
+  setNotice: (x: string) => void;
+}) {
+  const [items, setItems] = useState<StoryCatalogView[]>([]);
+  const [selectedId, setSelectedId] = useState("");
+  const [homeCityId, setHomeCityId] = useState(cities[0]?.id || "");
+  const [homePreview, setHomePreview] = useState<Data | null>(null);
+  const [routeId, setRouteId] = useState(routes[0]?.id || "");
+  const [pretrip, setPretrip] = useState<Data | null>(null);
+  const [busy, setBusy] = useState(false);
+  const selected = items.find((item) => item.id === selectedId);
+
+  const loadCatalog = useCallback(async () => {
+    try {
+      const rows = await request<StoryCatalogView[]>("/story-catalog");
+      setItems(rows);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "城市故事目录读取失败");
+    }
+  }, [request, setNotice]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => void loadCatalog(), 0);
+    return () => window.clearTimeout(timer);
+  }, [loadCatalog]);
+
+  async function saveStory(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setBusy(true);
+    try {
+      const form = new FormData(event.currentTarget);
+      const payload = {
+        expected_version: selected?.version,
+        city_id: String(form.get("city_id") || ""),
+        source_kind: String(form.get("source_kind") || ""),
+        source_id: String(form.get("source_id") || ""),
+        title: String(form.get("title") || ""),
+        summary: String(form.get("summary") || ""),
+        cover_image: String(form.get("cover_image") || ""),
+        district: String(form.get("district") || "") || null,
+        themes: parseTagText(String(form.get("themes") || "")),
+        point_ids: parseTagText(String(form.get("point_ids") || "")),
+        content_type: String(form.get("content_type") || ""),
+        place_context: String(form.get("place_context") || ""),
+        observable_detail: String(form.get("observable_detail") || ""),
+        attention_hint: String(form.get("attention_hint") || "") || null,
+        fact_status: String(form.get("fact_status") || "documented"),
+        review_status: String(form.get("review_status") || "in_review"),
+        sources: parseJsonArray(form, "sources"),
+        related_stories: parseJsonArray(form, "related_stories"),
+        variants: parseJsonArray(form, "variants"),
+        placements: parseJsonArray(form, "placements"),
+      };
+      const saved = await request<StoryCatalogView>(
+        selected ? `/story-catalog/${selected.id}` : "/story-catalog",
+        { method: selected ? "PUT" : "POST", body: JSON.stringify(payload) },
+      );
+      await loadCatalog();
+      setSelectedId(saved.id);
+      setNotice("城市故事已保存为草稿");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "城市故事保存失败");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function transitionStory(action: string) {
+    if (!selected) return;
+    try {
+      await request(`/story-catalog/${selected.id}/${action}`, { method: "POST" });
+      await loadCatalog();
+      setNotice(action === "publish" ? "城市故事已发布" : "状态已更新");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "状态更新失败");
+    }
+  }
+
+  async function loadHomePreview() {
+    if (!homeCityId) return;
+    try {
+      setHomePreview(await request<Data>(`/cities/${homeCityId}/home-story-preview`));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "首页模块预览失败");
+    }
+  }
+
+  async function loadPretrip(nextRouteId = routeId) {
+    if (!nextRouteId) return;
+    try {
+      setPretrip(await request<Data>(`/routes/${nextRouteId}/pretrip`));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "出发前内容读取失败");
+    }
+  }
+
+  async function savePretrip(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!routeId) return;
+    try {
+      const form = new FormData(event.currentTarget);
+      const payload = {
+        expected_version: num(pretrip?.version, 0),
+        theme_story_catalog_id:
+          String(form.get("theme_story_catalog_id") || "") || null,
+        story_directions: parseJsonArray(form, "story_directions"),
+        companion_tags: parseTagText(String(form.get("companion_tags") || "")),
+        safety_tips: parseTextLines(form, "safety_tips"),
+        rest_tips: parseTextLines(form, "rest_tips"),
+        accessibility_tips: parseTextLines(form, "accessibility_tips"),
+        weather_tips: parseTextLines(form, "weather_tips"),
+        offline_roles: parseTagText(String(form.get("offline_roles") || "")),
+      };
+      setPretrip(
+        await request<Data>(`/routes/${routeId}/pretrip`, {
+          method: "PUT",
+          body: JSON.stringify(payload),
+        }),
+      );
+      setNotice("出发前内容已保存为草稿");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "出发前内容保存失败");
+    }
+  }
+
+  return (
+    <div className="resource-grid">
+      <ResourcePanel eyebrow="CANONICAL CATALOG" title="共享故事目录">
+        <div className="form-grid">
+          <Field label="选择已有目录项">
+            <select value={selectedId} onChange={(event) => setSelectedId(event.target.value)}>
+              <option value="">＋ 新建目录项</option>
+              {items.map((item) => (
+                <option key={item.id} value={item.id}>
+                  {item.title} · {storyStatusLabel(item.status)}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </div>
+        <form key={selected?.id || "new"} onSubmit={saveStory} className="form-grid">
+          <Field label="所属城市">
+            <select name="city_id" defaultValue={selected?.city_id || ""} required>
+              <option value="">请选择</option>
+              {cities.map((city) => <option key={city.id} value={city.id}>{city.name}</option>)}
+            </select>
+          </Field>
+          <Field label="规范来源类型">
+            <select name="source_kind" defaultValue={selected?.source_kind || "story_arc"}>
+              <option value="story_arc">完整故事</option>
+              <option value="story_fragment">现场故事片段</option>
+            </select>
+          </Field>
+          <Field label="规范来源 ID">
+            <input name="source_id" defaultValue={selected?.source_id || ""} required />
+          </Field>
+          <Field label="内容类型（支持后台新增值）">
+            <input name="content_type" defaultValue={selected?.content_type || "街角故事"} required />
+          </Field>
+          <Field label="标题"><input name="title" defaultValue={selected?.title || ""} required /></Field>
+          <Field label="简介"><textarea name="summary" rows={3} defaultValue={selected?.summary || ""} required /></Field>
+          <Field label="封面路径"><input name="cover_image" defaultValue={selected?.cover_image || ""} required /></Field>
+          <Field label="街区"><input name="district" defaultValue={selected?.district || ""} /></Field>
+          <Field label="主题（逗号或换行分隔）"><textarea name="themes" rows={2} defaultValue={(selected?.themes || []).join("，")} /></Field>
+          <Field label="相关点位 ID"><textarea name="point_ids" rows={2} defaultValue={(selected?.point_ids || []).join("，")} /></Field>
+          <Field label="城市 / 地点背景"><textarea name="place_context" rows={3} defaultValue={selected?.place_context || ""} required /></Field>
+          <Field label="可观察的现实细节"><textarea name="observable_detail" rows={3} defaultValue={selected?.observable_detail || ""} required /></Field>
+          <Field label="现场留意提示（可选，不是答题）"><textarea name="attention_hint" rows={2} defaultValue={selected?.attention_hint || ""} /></Field>
+          <Field label="事实状态"><input name="fact_status" defaultValue={selected?.fact_status || "documented"} /></Field>
+          <Field label="审核状态"><select name="review_status" defaultValue={selected?.review_status || "in_review"}><option value="in_review">审核中</option><option value="reviewed">已审核</option><option value="disputed">有争议</option></select></Field>
+          <Field label="来源 JSON 数组"><textarea name="sources" rows={4} defaultValue={JSON.stringify(selected?.sources || [], null, 2)} /></Field>
+          <Field label="相关故事 JSON 数组（顺序仅建议）"><textarea name="related_stories" rows={4} defaultValue={JSON.stringify(selected?.related_stories || [], null, 2)} /></Field>
+          <Field label="展示变体 JSON 数组"><textarea name="variants" rows={6} defaultValue={JSON.stringify(selected?.variants || [], null, 2)} placeholder={'[{"role":"short_preview","track_id":"..."}]'} /></Field>
+          <Field label="首页 / 出发前位置 JSON 数组"><textarea name="placements" rows={7} defaultValue={JSON.stringify(selected?.placements || [], null, 2)} placeholder={'[{"channel":"home","module_key":"today_city_story","display_order":0}]'} /></Field>
+          {selected && (
+            <div className="validation-summary">
+              <StatusTag status={selected.status} />
+              {selected.warnings.map((message) => <p key={message}>提醒：{message}</p>)}
+              {selected.blockers.map((message) => <p key={message}>阻塞：{message}</p>)}
+              <details><summary>规范来源只读预览</summary><pre>{JSON.stringify(selected.source, null, 2)}</pre></details>
+            </div>
+          )}
+          <div className="import-actions">
+            <button className="primary-button" disabled={busy}>{busy ? "保存中…" : "保存草稿"}</button>
+            {selected?.status === "draft" && <button type="button" onClick={() => void transitionStory("submit-review")}>提交审核</button>}
+            {selected?.status === "in_review" && <button type="button" onClick={() => void transitionStory("verify")}>通过审核</button>}
+            {selected?.status === "verified" && <button type="button" onClick={() => void transitionStory("publish")}>发布</button>}
+            {selected?.status === "published" && <button type="button" onClick={() => void transitionStory("withdraw")}>撤回</button>}
+          </div>
+        </form>
+      </ResourcePanel>
+
+      <ResourcePanel eyebrow="HOME MODULE PREVIEW" title="五模块预览">
+        <Field label="城市">
+          <select value={homeCityId} onChange={(event) => setHomeCityId(event.target.value)}>
+            {cities.map((city) => <option key={city.id} value={city.id}>{city.name}</option>)}
+          </select>
+        </Field>
+        <button onClick={() => void loadHomePreview()}>刷新草稿 / 发布投影</button>
+        {homePreview && <pre>{JSON.stringify(homePreview, null, 2)}</pre>}
+      </ResourcePanel>
+
+      <ResourcePanel eyebrow="PRE-TRIP" title="旅行前知识与出发提示">
+        <Field label="路线">
+          <select value={routeId} onChange={(event) => { setRouteId(event.target.value); void loadPretrip(event.target.value); }}>
+            <option value="">请选择</option>
+            {routes.map((route) => <option key={route.id} value={route.id}>{route.title}</option>)}
+          </select>
+        </Field>
+        <button onClick={() => void loadPretrip()}>读取配置</button>
+        {pretrip && (
+          <form key={`${routeId}-${str(pretrip.version)}`} onSubmit={savePretrip} className="form-grid">
+            <Field label="主题故事目录 ID"><input name="theme_story_catalog_id" defaultValue={str(pretrip.theme_story_catalog_id)} /></Field>
+            <Field label="故事方向 JSON 数组（顺序仅建议）"><textarea name="story_directions" rows={6} defaultValue={JSON.stringify(pretrip.story_directions || [], null, 2)} /></Field>
+            <Field label="同行标签"><textarea name="companion_tags" rows={2} defaultValue={stringList(pretrip.companion_tags).join("，")} /></Field>
+            <Field label="安全提示（每行一条）"><textarea name="safety_tips" rows={3} defaultValue={stringList(pretrip.safety_tips).join("\n")} /></Field>
+            <Field label="休息提示（每行一条）"><textarea name="rest_tips" rows={3} defaultValue={stringList(pretrip.rest_tips).join("\n")} /></Field>
+            <Field label="无障碍提示（每行一条）"><textarea name="accessibility_tips" rows={3} defaultValue={stringList(pretrip.accessibility_tips).join("\n")} /></Field>
+            <Field label="天气适应提示（编辑内容，不是实时天气）"><textarea name="weather_tips" rows={3} defaultValue={stringList(pretrip.weather_tips).join("\n")} /></Field>
+            <Field label="可离线准备的变体角色"><input name="offline_roles" defaultValue={stringList(pretrip.offline_roles).join("，")} placeholder="short_preview，on_site_complete" /></Field>
+            <div className="import-actions">
+              <button className="primary-button">保存草稿</button>
+              {pretrip.status === "published" ? (
+                <button type="button" onClick={async () => { await request(`/routes/${routeId}/pretrip/withdraw`, { method: "POST" }); await loadPretrip(); }}>撤回</button>
+              ) : (
+                <button type="button" onClick={async () => { await request(`/routes/${routeId}/pretrip/publish`, { method: "POST" }); await loadPretrip(); }}>发布</button>
+              )}
+            </div>
+          </form>
+        )}
+      </ResourcePanel>
+    </div>
+  );
+}
+
+function parseJsonArray(form: FormData, field: string): Data[] {
+  const raw = String(form.get(field) || "").trim();
+  if (!raw) return [];
+  const parsed: unknown = JSON.parse(raw);
+  if (!Array.isArray(parsed)) throw new Error(`${field} 必须是 JSON 数组`);
+  return parsed as Data[];
+}
+
+function parseTextLines(form: FormData, field: string): string[] {
+  return String(form.get(field) || "")
+    .split("\n")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 function ImportView({
   request,
   onImported,
@@ -2805,19 +3117,29 @@ function ImportView({
     () =>
       JSON.stringify(
         {
-          cities: [
-            {
+          schema_version: "1.0",
+          package_id: "city-knowledge-sample",
+          package_version: "2026.08.23-1",
+          entities: {
+            cities: [{
+              id: "city-hangzhou",
               slug: "hangzhou",
               name: "杭州",
               subtitle: "在水岸与街巷之间漫游",
               hero_image: "images/hangzhou.jpg",
               latitude: 30.2741,
               longitude: 120.1551,
-            },
-          ],
-          routes: [],
-          stops: [],
-          challenges: [],
+            }],
+            routes: [],
+            stops: [],
+            story_arcs: [],
+            story_fragments: [],
+            catalog_items: [],
+            variants: [],
+            placements: [],
+            pretrip_guidance: [],
+            media: [],
+          },
         },
         null,
         2,
@@ -2826,6 +3148,7 @@ function ImportView({
   );
   const [content, setContent] = useState(sample);
   const [importing, setImporting] = useState(false);
+  const [preview, setPreview] = useState<ImportPreview | null>(null);
   function readFile(event: React.ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -2833,23 +3156,57 @@ function ImportView({
     reader.onload = () => setContent(String(reader.result || ""));
     reader.readAsText(file);
   }
-  async function submit() {
+  async function submitPreview() {
     setImporting(true);
+    setPreview(null);
     try {
       const parsed = JSON.parse(content);
-      if (parsed.package_id && parsed.story_arc)
+      if (parsed.schema_version === "1.0" && parsed.entities) {
+        const form = new FormData();
+        form.append(
+          "file",
+          new File([content], `${parsed.package_id || "content-package"}.json`, {
+            type: "application/json",
+          }),
+        );
+        setPreview(
+          await request<ImportPreview>("/multi-city-import/preview", {
+            method: "POST",
+            body: form,
+          }),
+        );
+        setNotice("预检完成；确认前数据库中没有写入内容记录");
+      } else if (parsed.package_id && parsed.story_arc) {
         await request("/fragmented-routes/import", {
           method: "POST",
           body: JSON.stringify(parsed),
         });
-      else
+        onImported();
+      } else {
         await request("/import", {
           method: "POST",
           body: JSON.stringify(parsed),
         });
-      onImported();
+        onImported();
+      }
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "导入失败");
+    } finally {
+      setImporting(false);
+    }
+  }
+  async function confirmImport() {
+    if (!preview?.confirmation_token) return;
+    setImporting(true);
+    try {
+      await request("/multi-city-import/confirm", {
+        method: "POST",
+        body: JSON.stringify({ confirmation_token: preview.confirmation_token }),
+      });
+      setPreview(null);
+      onImported();
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "确认导入失败");
     } finally {
       setImporting(false);
     }
@@ -2882,20 +3239,52 @@ function ImportView({
           </button>
           <button
             className="primary-button"
-            onClick={submit}
+            onClick={submitPreview}
             disabled={importing}
           >
-            {importing ? "导入中…" : "校验并导入数据库"}
+            {importing ? "处理中…" : "上传并预检"}
           </button>
         </div>
+        {preview && (
+          <section className="validation-summary" aria-live="polite">
+            <h3>预检结果</h3>
+            <p>
+              新增 {preview.counts.new || 0} · 更新 {preview.counts.updated || 0} ·
+              不变 {preview.counts.unchanged || 0} · 冲突 {preview.counts.conflicted || 0} ·
+              无效 {preview.counts.invalid || 0}
+            </p>
+            {preview.problems.length > 0 && (
+              <IssueList title="阻塞项" rows={preview.problems} empty="没有阻塞项" />
+            )}
+            <details>
+              <summary>逐项差异（{preview.changes.length}）</summary>
+              <ul>
+                {preview.changes.map((change) => (
+                  <li key={`${change.entity}-${change.id}-${change.path}`}>
+                    <code>{change.path}</code> · {change.status}
+                    {change.changed_fields.length > 0 && ` · ${change.changed_fields.join("、")}`}
+                  </li>
+                ))}
+              </ul>
+            </details>
+            <button
+              className="primary-button"
+              disabled={!preview.can_confirm || importing}
+              onClick={() => void confirmImport()}
+            >
+              确认写入草稿区
+            </button>
+            {!preview.can_confirm && <p>修复全部阻塞项后重新上传，才能确认导入。</p>}
+          </section>
+        )}
       </article>
       <aside className="panel import-help">
         <p className="eyebrow">SUPPORTED CONTENT</p>
         <h2>支持内容</h2>
         <ul>
           <li>
-            <b>fragmented route package</b>
-            <span>完整故事图、旁白、定位、照片任务、史实与来源</span>
+            <b>schema_version 1.0 多城市包</b>
+            <span>城市、路线、点位、故事、目录位置、出发前提示与受管媒体引用</span>
           </li>
           <li>
             <b>cities / routes</b>
@@ -2911,8 +3300,8 @@ function ImportView({
           </li>
         </ul>
         <p>
-          包含 package_id 与 story_arc
-          的文件会进入碎片导览导入流程，先保存为草稿；请到“碎片导览”查看校验结果并发布。相同版本重复导入是幂等的。
+          新格式必须先预检再确认，确认时整包事务写入且一律进入草稿；不会绕过审核或发布。
+          旧的单路线碎片包和传统 cities/routes/stops 文件仍保持原接口兼容。
         </p>
       </aside>
     </section>

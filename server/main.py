@@ -13,17 +13,29 @@ from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import (
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    HTTPException,
+    Request,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import create_engine, delete, func, or_, select
+from sqlalchemy import create_engine, delete, func, inspect, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from content_graph import validate_graph
-from content_schema import ensure_photo_mission_guidance_schema, normalize_experience_tags
+from content_schema import (
+    ensure_photo_mission_guidance_schema,
+    normalize_experience_tags,
+)
 from models import (
     Challenge,
     City,
@@ -41,11 +53,23 @@ from models import (
     NarrationVoiceProfile,
     PhotoMission,
     Route,
+    RoutePretripGuidance,
     Stop,
     StoryArc,
+    StoryCatalogItem,
+    StoryCatalogVariant,
     StoryFragment,
     StoryNarrationTrack,
+    StoryPlacement,
     TriggerRegion,
+)
+from multi_city_import import (
+    PackageValidationError,
+    build_preview,
+    confirm_preview,
+    normalize_package,
+    parse_package,
+    persist_preview,
 )
 from object_storage import AlibabaOssObjectStorage, LocalObjectStorage, StoredObject
 from narration import (
@@ -55,7 +79,11 @@ from narration import (
     NarrationSynthesisError,
 )
 from runtime_logs.docker_source import DockerLogSource
-from runtime_logs.normalization import NormalizationLimits, normalize_event, normalize_level
+from runtime_logs.normalization import (
+    NormalizationLimits,
+    normalize_event,
+    normalize_level,
+)
 from runtime_logs.storage import (
     cleanup_client_logs,
     ensure_client_log_schema,
@@ -71,7 +99,9 @@ logger = logging.getLogger(__name__)
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    database_url: str = "mysql+pymysql://jiandi:jiandi_dev@127.0.0.1:3307/jiandi?charset=utf8mb4"
+    database_url: str = (
+        "mysql+pymysql://jiandi:jiandi_dev@127.0.0.1:3307/jiandi?charset=utf8mb4"
+    )
     admin_token: str = "dev-only-change-me"
     media_root: str = "./media"
     cors_origins: str = "http://localhost:3000"
@@ -101,7 +131,9 @@ class Settings(BaseSettings):
     backend_logs_enabled: bool = False
     docker_socket_path: str = "/var/run/docker.sock"
     docker_api_version: str = "v1.41"
-    log_sources: str = "travel-api=deeptravel-api-1,admin-api=deeptravel-admin-admin-api-1"
+    log_sources: str = (
+        "travel-api=deeptravel-api-1,admin-api=deeptravel-admin-admin-api-1"
+    )
     log_tail_limit: int = 300
     log_line_max_chars: int = 8_000
     log_context_max_chars: int = 1_000
@@ -119,7 +151,11 @@ def parse_log_sources(value: str) -> dict[str, str]:
         alias, separator, target = item.partition("=")
         alias = alias.strip()
         target = target.strip()
-        if not separator or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", alias) or not target:
+        if (
+            not separator
+            or not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", alias)
+            or not target
+        ):
             raise ValueError(f"非法 LOG_SOURCES 项：{item}")
         sources[alias] = target
     return sources
@@ -131,8 +167,15 @@ SessionLocal = sessionmaker(engine, expire_on_commit=False)
 media_root = Path(settings.media_root).resolve()
 media_root.mkdir(parents=True, exist_ok=True)
 if settings.object_storage_provider == "oss":
-    if not settings.oss_region or not settings.oss_public_bucket or not settings.oss_private_bucket or not settings.oss_public_base_url:
-        raise RuntimeError("OSS 模式必须配置 OSS_REGION、OSS_PUBLIC_BUCKET、OSS_PRIVATE_BUCKET 与 OSS_PUBLIC_BASE_URL")
+    if (
+        not settings.oss_region
+        or not settings.oss_public_bucket
+        or not settings.oss_private_bucket
+        or not settings.oss_public_base_url
+    ):
+        raise RuntimeError(
+            "OSS 模式必须配置 OSS_REGION、OSS_PUBLIC_BUCKET、OSS_PRIVATE_BUCKET 与 OSS_PUBLIC_BASE_URL"
+        )
     public_object_storage = AlibabaOssObjectStorage(
         region=settings.oss_region,
         bucket=settings.oss_public_bucket,
@@ -204,7 +247,9 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="简地内容中台 API", version="1.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[item.strip() for item in settings.cors_origins.split(",") if item.strip()],
+    allow_origins=[
+        item.strip() for item in settings.cors_origins.split(",") if item.strip()
+    ],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -225,8 +270,12 @@ def authorize(authorization: Annotated[str | None, Header()] = None) -> None:
         raise HTTPException(status_code=401, detail="管理令牌无效")
 
 
-def authorize_client_ingest(x_client_log_token: Annotated[str | None, Header()] = None) -> None:
-    if not x_client_log_token or not hmac.compare_digest(x_client_log_token, settings.client_log_ingest_token):
+def authorize_client_ingest(
+    x_client_log_token: Annotated[str | None, Header()] = None,
+) -> None:
+    if not x_client_log_token or not hmac.compare_digest(
+        x_client_log_token, settings.client_log_ingest_token
+    ):
         raise HTTPException(status_code=401, detail="客户端日志令牌无效")
 
 
@@ -251,7 +300,9 @@ def city_dict(item: City) -> dict[str, Any]:
     }
 
 
-def route_dict(item: Route, city_name: str | None = None, stop_count: int = 0) -> dict[str, Any]:
+def route_dict(
+    item: Route, city_name: str | None = None, stop_count: int = 0
+) -> dict[str, Any]:
     return {
         "id": item.id,
         "city_id": item.city_id,
@@ -268,14 +319,17 @@ def route_dict(item: Route, city_name: str | None = None, stop_count: int = 0) -
         "is_featured": item.is_featured,
         "content_status": item.content_status,
         "published_at": iso(item.published_at),
-        "is_public_visible": item.content_status == "published" and item.published_at is not None,
+        "is_public_visible": item.content_status == "published"
+        and item.published_at is not None,
         "managed_package_id": item.managed_package_id,
         "managed_package_version": item.managed_package_version,
         "stop_count": stop_count,
     }
 
 
-def stop_dict(item: Stop, route_title: str | None = None, has_challenge: bool = False) -> dict[str, Any]:
+def stop_dict(
+    item: Stop, route_title: str | None = None, has_challenge: bool = False
+) -> dict[str, Any]:
     return {
         "id": item.id,
         "route_id": item.route_id,
@@ -303,7 +357,9 @@ def stop_values(payload: StopInput) -> dict[str, Any]:
     return values
 
 
-def challenge_dict(item: Challenge, stop_title: str | None = None, route_title: str | None = None) -> dict[str, Any]:
+def challenge_dict(
+    item: Challenge, stop_title: str | None = None, route_title: str | None = None
+) -> dict[str, Any]:
     return {
         "id": item.id,
         "stop_id": item.stop_id,
@@ -334,8 +390,650 @@ def health(_: Auth, db: Db):
         "media_root": str(media_root),
         "media_storage": public_object_storage.provider,
         "client_log_storage": "connected",
-        "backend_logs": "available" if settings.backend_logs_enabled and docker_log_source.available else "unavailable",
+        "backend_logs": "available"
+        if settings.backend_logs_enabled and docker_log_source.available
+        else "unavailable",
     }
+
+
+REQUIRED_CITY_STORY_TABLES = {
+    "story_catalog_items",
+    "story_catalog_variants",
+    "story_placements",
+    "route_pretrip_guidance",
+    "content_import_previews",
+    "content_import_batches",
+}
+HOME_MODULES = (
+    ("today_city_story", "今天听一段城市故事"),
+    ("street_corner_3min", "3 分钟了解一个街角"),
+    ("city_small_thing", "一座城市的一件小事"),
+    ("overlooked_detail", "你路过但没注意的细节"),
+    ("today_destination", "今天适合去哪儿"),
+)
+
+
+def require_city_story_schema() -> None:
+    missing = REQUIRED_CITY_STORY_TABLES - set(inspect(engine).get_table_names())
+    if missing:
+        raise HTTPException(
+            503,
+            "主服务数据库尚未升级到 20260823_0013；缺少：" + "、".join(sorted(missing)),
+        )
+
+
+def _source_context(db: Session, source_kind: str, source_id: str) -> dict[str, Any]:
+    if source_kind == "story_arc":
+        source = db.get(StoryArc, source_id)
+        if source is None:
+            raise HTTPException(422, "完整故事来源不存在")
+        transcript = source.complete_story.strip()
+        tracks = list(
+            db.scalars(
+                select(StoryNarrationTrack).where(
+                    StoryNarrationTrack.arc_id == source.id
+                )
+            )
+        )
+        return {
+            "source_kind": source_kind,
+            "source_id": source.id,
+            "title": source.title,
+            "transcript": transcript,
+            "canonical_revision": hashlib.sha256(transcript.encode()).hexdigest(),
+            "script_version": source.script_version,
+            "review_status": source.review_state,
+            "tracks": [
+                {
+                    "id": track.id,
+                    "kind": "story",
+                    "transcript_hash": track.transcript_hash,
+                    "script_version": track.script_version,
+                    "duration_ms": track.duration_ms,
+                    "status": track.status,
+                    "media_path": track.media_path,
+                }
+                for track in tracks
+            ],
+        }
+    if source_kind == "story_fragment":
+        source = db.get(StoryFragment, source_id)
+        if source is None:
+            raise HTTPException(422, "现场故事来源不存在")
+        transcript = source.narration_script.strip()
+        tracks = list(
+            db.scalars(
+                select(FragmentNarrationTrack).where(
+                    FragmentNarrationTrack.fragment_id == source.id
+                )
+            )
+        )
+        return {
+            "source_kind": source_kind,
+            "source_id": source.id,
+            "title": source.title,
+            "transcript": transcript,
+            "canonical_revision": hashlib.sha256(transcript.encode()).hexdigest(),
+            "script_version": source.script_version,
+            "review_status": source.review_state,
+            "tracks": [
+                {
+                    "id": track.id,
+                    "kind": "fragment",
+                    "transcript_hash": track.transcript_hash,
+                    "script_version": track.script_version,
+                    "duration_ms": 0,
+                    "status": "published" if track.published_at else "approved",
+                    "media_path": track.media_path,
+                }
+                for track in tracks
+            ],
+        }
+    raise HTTPException(422, "source_kind 仅支持 story_arc 或 story_fragment")
+
+
+def _catalog_payload(db: Session, item: StoryCatalogItem) -> dict[str, Any]:
+    source = _source_context(db, item.source_kind, item.source_id)
+    variants = list(
+        db.scalars(
+            select(StoryCatalogVariant)
+            .where(StoryCatalogVariant.catalog_item_id == item.id)
+            .order_by(StoryCatalogVariant.role)
+        )
+    )
+    placements = list(
+        db.scalars(
+            select(StoryPlacement)
+            .where(StoryPlacement.catalog_item_id == item.id)
+            .order_by(StoryPlacement.channel, StoryPlacement.display_order)
+        )
+    )
+    blockers: list[str] = []
+    if source["canonical_revision"] != item.canonical_revision:
+        blockers.append("来源正文已变化，需要重新审核变体")
+    if source["review_status"] != "reviewed":
+        blockers.append("规范故事尚未审核")
+    if item.review_status != "reviewed":
+        blockers.append("目录元数据尚未审核")
+    if (
+        not item.title.strip()
+        or not item.summary.strip()
+        or not item.cover_image.strip()
+    ):
+        blockers.append("标题、简介和封面不能为空")
+    if not item.place_context.strip() or not item.observable_detail.strip():
+        blockers.append("地点背景和可观察细节不能为空")
+    if not item.sources_json:
+        blockers.append("至少需要一个事实来源")
+    track_map = {track["id"]: track for track in source["tracks"]}
+    variant_payloads: list[dict[str, Any]] = []
+    durations: list[int] = []
+    for variant in variants:
+        track = track_map.get(variant.track_id)
+        stale = (
+            track is None
+            or variant.transcript_hash != source["canonical_revision"]
+            or variant.script_version != source["script_version"]
+            or track["transcript_hash"] != source["canonical_revision"]
+            or track["status"] not in {"approved", "published"}
+        )
+        if stale:
+            blockers.append(f"{variant.role} 变体与当前正文或音频不一致")
+        if track and track["duration_ms"]:
+            durations.append(int(track["duration_ms"]))
+        variant_payloads.append(
+            {
+                "id": variant.id,
+                "role": variant.role,
+                "source_kind": variant.source_kind,
+                "source_id": variant.source_id,
+                "track_kind": variant.track_kind,
+                "track_id": variant.track_id,
+                "transcript_hash": variant.transcript_hash,
+                "script_version": variant.script_version,
+                "status": variant.status,
+                "stale": stale,
+            }
+        )
+    if not variants:
+        blockers.append("至少需要一个已审核的展示变体")
+    duration_ms = (
+        min(durations) if durations else max(1, len(source["transcript"]) // 4) * 1000
+    )
+    warnings = []
+    if duration_ms < 180_000 or duration_ms > 480_000:
+        warnings.append("建议将短故事控制在 3–8 分钟；此项不阻止发布")
+    return {
+        "id": item.id,
+        "city_id": item.city_id,
+        "source_kind": item.source_kind,
+        "source_id": item.source_id,
+        "canonical_revision": item.canonical_revision,
+        "title": item.title,
+        "summary": item.summary,
+        "cover_image": item.cover_image,
+        "district": item.district,
+        "themes": item.themes_json,
+        "point_ids": item.point_ids_json,
+        "related_stories": item.related_stories_json,
+        "content_type": item.content_type,
+        "place_context": item.place_context,
+        "observable_detail": item.observable_detail,
+        "attention_hint": item.attention_hint,
+        "sources": item.sources_json,
+        "fact_status": item.fact_status,
+        "review_status": item.review_status,
+        "status": item.status,
+        "version": item.version,
+        "source": source,
+        "variants": variant_payloads,
+        "placements": [
+            {
+                "id": row.id,
+                "channel": row.channel,
+                "module_key": row.module_key,
+                "route_id": row.route_id,
+                "variant_role": row.variant_role,
+                "display_order": row.display_order,
+                "weight": row.weight,
+                "status": row.status,
+                "starts_at": iso(row.starts_at),
+                "ends_at": iso(row.ends_at),
+            }
+            for row in placements
+        ],
+        "duration_ms": duration_ms,
+        "warnings": warnings,
+        "blockers": sorted(set(blockers)),
+        "ready_to_publish": not blockers,
+        "updated_at": iso(item.updated_at),
+    }
+
+
+def _save_catalog_item(
+    db: Session, payload: dict[str, Any], item: StoryCatalogItem | None = None
+) -> StoryCatalogItem:
+    forbidden = {
+        "transcript",
+        "audio",
+        "audio_path",
+        "narration_script",
+    } & payload.keys()
+    if forbidden:
+        raise HTTPException(422, "目录只引用规范故事，不能复制正文或音频字段")
+    now = datetime.now(UTC)
+    source_kind = str(payload.get("source_kind") or (item.source_kind if item else ""))
+    source_id = str(payload.get("source_id") or (item.source_id if item else ""))
+    source = _source_context(db, source_kind, source_id)
+    if item is None:
+        item = StoryCatalogItem(
+            id=str(payload.get("id") or uuid4()),
+            source_kind=source_kind,
+            source_id=source_id,
+            canonical_revision=source["canonical_revision"],
+            city_id=str(payload.get("city_id") or ""),
+            title=str(payload.get("title") or source["title"]),
+            summary=str(payload.get("summary") or ""),
+            cover_image=str(payload.get("cover_image") or ""),
+            content_type=str(payload.get("content_type") or "街角故事"),
+            place_context=str(payload.get("place_context") or ""),
+            observable_detail=str(payload.get("observable_detail") or ""),
+            status="draft",
+            review_status="in_review",
+            version=1,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(item)
+    elif item.status == "published":
+        raise HTTPException(409, "已发布目录请先撤回再修改")
+    elif source_kind != item.source_kind or source_id != item.source_id:
+        item.source_kind = source_kind
+        item.source_id = source_id
+        item.canonical_revision = source["canonical_revision"]
+        item.review_status = "in_review"
+    mappings = {
+        "city_id": "city_id",
+        "title": "title",
+        "summary": "summary",
+        "cover_image": "cover_image",
+        "district": "district",
+        "themes": "themes_json",
+        "point_ids": "point_ids_json",
+        "related_stories": "related_stories_json",
+        "content_type": "content_type",
+        "place_context": "place_context",
+        "observable_detail": "observable_detail",
+        "attention_hint": "attention_hint",
+        "sources": "sources_json",
+        "fact_status": "fact_status",
+        "review_status": "review_status",
+    }
+    for source_field, target_field in mappings.items():
+        if source_field in payload:
+            setattr(item, target_field, payload[source_field])
+    if db.get(City, item.city_id) is None:
+        raise HTTPException(422, "所属城市不存在")
+    item.version += 1 if item.created_at != now else 0
+    item.updated_at = now
+    db.flush()
+    if "variants" in payload:
+        db.execute(
+            delete(StoryCatalogVariant).where(
+                StoryCatalogVariant.catalog_item_id == item.id
+            )
+        )
+        for raw in payload["variants"]:
+            role = str(raw.get("role") or "")
+            if role not in {"short_preview", "on_site_complete"}:
+                raise HTTPException(
+                    422, "变体 role 仅支持 short_preview/on_site_complete"
+                )
+            track_id = str(raw.get("track_id") or "")
+            track = next(
+                (row for row in source["tracks"] if row["id"] == track_id), None
+            )
+            if track is None:
+                raise HTTPException(422, f"变体音频 {track_id} 不属于当前规范故事")
+            db.add(
+                StoryCatalogVariant(
+                    id=str(raw.get("id") or uuid4()),
+                    catalog_item_id=item.id,
+                    role=role,
+                    source_kind=item.source_kind,
+                    source_id=item.source_id,
+                    track_kind=track["kind"],
+                    track_id=track_id,
+                    transcript_hash=source["canonical_revision"],
+                    script_version=source["script_version"],
+                    status="draft",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    if "placements" in payload:
+        db.execute(
+            delete(StoryPlacement).where(StoryPlacement.catalog_item_id == item.id)
+        )
+        for raw in payload["placements"]:
+            module_key = raw.get("module_key")
+            if raw.get("channel") == "home" and module_key not in dict(HOME_MODULES):
+                raise HTTPException(
+                    422, "首页 placement 必须使用五个固定 module_key 之一"
+                )
+            db.add(
+                StoryPlacement(
+                    id=str(raw.get("id") or uuid4()),
+                    catalog_item_id=item.id,
+                    channel=str(raw.get("channel") or "home"),
+                    module_key=module_key,
+                    route_id=raw.get("route_id"),
+                    variant_role=str(raw.get("variant_role") or "short_preview"),
+                    display_order=int(raw.get("display_order") or 0),
+                    weight=max(1, int(raw.get("weight") or 1)),
+                    status="draft",
+                    starts_at=_parse_datetime(raw.get("starts_at")),
+                    ends_at=_parse_datetime(raw.get("ends_at")),
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+    return item
+
+
+@app.get("/api/admin/schema/city-stories")
+def city_story_schema_status(_: Auth):
+    require_city_story_schema()
+    return {"status": "compatible", "required_migration": "20260823_0013"}
+
+
+@app.get("/api/admin/story-catalog")
+def list_story_catalog(_: Auth, db: Db, city_id: str | None = None):
+    require_city_story_schema()
+    query = select(StoryCatalogItem).order_by(StoryCatalogItem.updated_at.desc())
+    if city_id:
+        query = query.where(StoryCatalogItem.city_id == city_id)
+    return [_catalog_payload(db, item) for item in db.scalars(query)]
+
+
+@app.get("/api/admin/story-catalog/{item_id}")
+def get_story_catalog(item_id: str, _: Auth, db: Db):
+    require_city_story_schema()
+    item = db.get(StoryCatalogItem, item_id)
+    if item is None:
+        raise HTTPException(404, "城市故事不存在")
+    return _catalog_payload(db, item)
+
+
+@app.post("/api/admin/story-catalog", status_code=201)
+def create_story_catalog(payload: dict[str, Any], _: Auth, db: Db):
+    require_city_story_schema()
+    try:
+        item = _save_catalog_item(db, payload)
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(409, "同一规范故事只能建立一个目录项") from exc
+    return _catalog_payload(db, item)
+
+
+@app.put("/api/admin/story-catalog/{item_id}")
+def update_story_catalog(item_id: str, payload: dict[str, Any], _: Auth, db: Db):
+    require_city_story_schema()
+    item = db.get(StoryCatalogItem, item_id)
+    if item is None:
+        raise HTTPException(404, "城市故事不存在")
+    expected_version = payload.pop("expected_version", None)
+    if expected_version is not None and int(expected_version) != item.version:
+        raise HTTPException(409, "内容已被其他编辑更新，请刷新后重试")
+    item = _save_catalog_item(db, payload, item)
+    db.commit()
+    return _catalog_payload(db, item)
+
+
+@app.post("/api/admin/story-catalog/{item_id}/{action}")
+def transition_story_catalog(item_id: str, action: str, _: Auth, db: Db):
+    require_city_story_schema()
+    item = db.get(StoryCatalogItem, item_id)
+    if item is None:
+        raise HTTPException(404, "城市故事不存在")
+    now = datetime.now(UTC)
+    if action == "submit-review":
+        item.status = "in_review"
+    elif action == "verify":
+        item.status = "verified"
+        item.review_status = "reviewed"
+        item.reviewed_at = now
+    elif action == "publish":
+        projection = _catalog_payload(db, item)
+        if projection["blockers"]:
+            raise HTTPException(
+                422, {"message": "仍有发布阻塞项", "blockers": projection["blockers"]}
+            )
+        item.status = "published"
+        item.published_at = now
+        for row in db.scalars(
+            select(StoryCatalogVariant).where(
+                StoryCatalogVariant.catalog_item_id == item.id
+            )
+        ):
+            row.status = "published"
+            row.published_at = now
+        for row in db.scalars(
+            select(StoryPlacement).where(StoryPlacement.catalog_item_id == item.id)
+        ):
+            row.status = "published"
+            row.published_at = now
+    elif action == "withdraw":
+        item.status = "draft"
+        item.published_at = None
+        for model in (StoryCatalogVariant, StoryPlacement):
+            for row in db.scalars(
+                select(model).where(model.catalog_item_id == item.id)
+            ):
+                row.status = "draft"
+                row.published_at = None
+    else:
+        raise HTTPException(404, "未知生命周期操作")
+    item.updated_at = now
+    db.commit()
+    return _catalog_payload(db, item)
+
+
+@app.get("/api/admin/cities/{city_id}/home-story-preview")
+def preview_city_home(city_id: str, _: Auth, db: Db):
+    require_city_story_schema()
+    if db.get(City, city_id) is None:
+        raise HTTPException(404, "城市不存在")
+    modules = []
+    for key, label in HOME_MODULES:
+        placements = list(
+            db.scalars(
+                select(StoryPlacement)
+                .join(
+                    StoryCatalogItem,
+                    StoryCatalogItem.id == StoryPlacement.catalog_item_id,
+                )
+                .where(
+                    StoryCatalogItem.city_id == city_id,
+                    StoryPlacement.channel == "home",
+                    StoryPlacement.module_key == key,
+                )
+                .order_by(StoryPlacement.display_order, StoryPlacement.weight.desc())
+            )
+        )
+        modules.append(
+            {
+                "key": key,
+                "label": label,
+                "items": [
+                    _catalog_payload(db, db.get(StoryCatalogItem, row.catalog_item_id))
+                    for row in placements
+                ],
+                "empty": not placements,
+            }
+        )
+    return {"city_id": city_id, "modules": modules}
+
+
+def _pretrip_payload(
+    item: RoutePretripGuidance | None, route_id: str
+) -> dict[str, Any]:
+    if item is None:
+        return {
+            "route_id": route_id,
+            "theme_story_catalog_id": None,
+            "story_directions": [],
+            "companion_tags": [],
+            "safety_tips": [],
+            "rest_tips": [],
+            "accessibility_tips": [],
+            "weather_tips": [],
+            "offline_roles": [],
+            "status": "draft",
+            "version": 0,
+        }
+    return {
+        "route_id": item.route_id,
+        "theme_story_catalog_id": item.theme_story_catalog_id,
+        "story_directions": item.story_directions_json,
+        "companion_tags": item.companion_tags_json,
+        "safety_tips": item.safety_tips_json,
+        "rest_tips": item.rest_tips_json,
+        "accessibility_tips": item.accessibility_tips_json,
+        "weather_tips": item.weather_tips_json,
+        "offline_roles": item.offline_roles_json,
+        "status": item.status,
+        "version": item.version,
+        "updated_at": iso(item.updated_at),
+    }
+
+
+@app.get("/api/admin/routes/{route_id}/pretrip")
+def get_route_pretrip(route_id: str, _: Auth, db: Db):
+    require_city_story_schema()
+    if db.get(Route, route_id) is None:
+        raise HTTPException(404, "路线不存在")
+    return _pretrip_payload(db.get(RoutePretripGuidance, route_id), route_id)
+
+
+@app.put("/api/admin/routes/{route_id}/pretrip")
+def save_route_pretrip(route_id: str, payload: dict[str, Any], _: Auth, db: Db):
+    require_city_story_schema()
+    if db.get(Route, route_id) is None:
+        raise HTTPException(404, "路线不存在")
+    item = db.get(RoutePretripGuidance, route_id)
+    if item and item.status == "published":
+        raise HTTPException(409, "已发布的出发前内容请先撤回")
+    expected_version = payload.pop("expected_version", None)
+    if item and expected_version is not None and int(expected_version) != item.version:
+        raise HTTPException(409, "内容已被其他编辑更新，请刷新后重试")
+    now = datetime.now(UTC)
+    if item is None:
+        item = RoutePretripGuidance(
+            route_id=route_id, status="draft", version=0, updated_at=now
+        )
+        db.add(item)
+    theme_id = payload.get("theme_story_catalog_id", item.theme_story_catalog_id)
+    if theme_id and db.get(StoryCatalogItem, str(theme_id)) is None:
+        raise HTTPException(422, "主题故事不存在")
+    item.theme_story_catalog_id = theme_id or None
+    for source_field, target_field in {
+        "story_directions": "story_directions_json",
+        "companion_tags": "companion_tags_json",
+        "safety_tips": "safety_tips_json",
+        "rest_tips": "rest_tips_json",
+        "accessibility_tips": "accessibility_tips_json",
+        "weather_tips": "weather_tips_json",
+        "offline_roles": "offline_roles_json",
+    }.items():
+        if source_field in payload:
+            setattr(item, target_field, payload[source_field])
+    item.status = "in_review" if payload.get("submit_review") else "draft"
+    item.version += 1
+    item.updated_at = now
+    db.commit()
+    return _pretrip_payload(item, route_id)
+
+
+@app.post("/api/admin/routes/{route_id}/pretrip/{action}")
+def transition_route_pretrip(route_id: str, action: str, _: Auth, db: Db):
+    require_city_story_schema()
+    item = db.get(RoutePretripGuidance, route_id)
+    if item is None:
+        raise HTTPException(404, "出发前内容不存在")
+    now = datetime.now(UTC)
+    if action == "publish":
+        if not item.theme_story_catalog_id:
+            raise HTTPException(422, "发布前必须配置主题故事")
+        story = db.get(StoryCatalogItem, item.theme_story_catalog_id)
+        if story is None or story.status != "published":
+            raise HTTPException(422, "主题故事尚未发布")
+        item.status = "published"
+        item.reviewed_at = now
+        item.published_at = now
+    elif action == "withdraw":
+        item.status = "draft"
+        item.published_at = None
+    else:
+        raise HTTPException(404, "未知生命周期操作")
+    item.version += 1
+    item.updated_at = now
+    db.commit()
+    return _pretrip_payload(item, route_id)
+
+
+def _package_error(exc: PackageValidationError) -> HTTPException:
+    return HTTPException(
+        422, {"message": str(exc), "problems": [x.as_dict() for x in exc.problems]}
+    )
+
+
+@app.post("/api/admin/multi-city-import/preview", status_code=201)
+async def preview_multi_city_import(file: UploadFile, _: Auth, db: Db):
+    require_city_story_schema()
+    if not file.filename or not file.filename.lower().endswith(".json"):
+        raise HTTPException(422, "请选择 JSON 文件")
+    try:
+        package = normalize_package(parse_package(await file.read(2 * 1024 * 1024 + 1)))
+        plan = build_preview(db, package)
+        preview, token = persist_preview(
+            db, plan, editor_id="admin-token", secret=settings.admin_token
+        )
+        db.commit()
+    except PackageValidationError as exc:
+        db.rollback()
+        raise _package_error(exc) from exc
+    return {
+        "preview_id": preview.id,
+        "confirmation_token": token if plan["can_confirm"] else None,
+        "expires_at": iso(preview.expires_at),
+        **{
+            key: value
+            for key, value in plan.items()
+            if key not in {"package", "target_revisions"}
+        },
+    }
+
+
+@app.post("/api/admin/multi-city-import/confirm")
+def confirm_multi_city_import(payload: dict[str, Any], _: Auth, db: Db):
+    require_city_story_schema()
+    token = str(payload.get("confirmation_token") or "")
+    if not token:
+        raise HTTPException(422, "confirmation_token 不能为空")
+    try:
+        result = confirm_preview(
+            db, token=token, editor_id="admin-token", secret=settings.admin_token
+        )
+        db.commit()
+    except PackageValidationError as exc:
+        db.rollback()
+        raise _package_error(exc) from exc
+    except Exception:
+        db.rollback()
+        raise
+    return result
 
 
 def _query_client_events(**kwargs: Any):
@@ -359,7 +1057,9 @@ async def ingest_client_logs(request: Request, _: ClientLogAuth, db: Db):
     try:
         payload = ClientLogBatch.model_validate_json(body)
     except ValidationError as exc:
-        raise HTTPException(422, exc.errors(include_input=False, include_url=False)) from exc
+        raise HTTPException(
+            422, exc.errors(include_input=False, include_url=False)
+        ) from exc
     if len(payload.events) > min(50, max(1, settings.client_log_max_batch)):
         raise HTTPException(422, "单批客户端日志数量超出限制")
 
@@ -411,7 +1111,11 @@ def list_log_sources(_: Auth):
     return {
         "client": {"id": "client", "label": "客户端", "available": True},
         "backend": [
-            {"id": alias, "label": alias.replace("-", " "), "available": backend_available}
+            {
+                "id": alias,
+                "label": alias.replace("-", " "),
+                "available": backend_available,
+            }
             for alias in configured_log_sources
         ],
         "limits": {
@@ -450,7 +1154,11 @@ def client_log_history(
 async def client_log_stream(request: Request, *, after: int | None, tail: int):
     yield sse_message(
         "metadata",
-        {"source_type": "client", "source": "client", "heartbeat_seconds": settings.log_heartbeat_seconds},
+        {
+            "source_type": "client",
+            "source": "client",
+            "heartbeat_seconds": settings.log_heartbeat_seconds,
+        },
     )
     cursor = after
     initial = await asyncio.to_thread(
@@ -474,13 +1182,17 @@ async def client_log_stream(request: Request, *, after: int | None, tail: int):
             cursor = int(event.cursor)
             yield sse_message("log", event.to_dict(), cursor=event.cursor)
             last_heartbeat = time.monotonic()
-        if time.monotonic() - last_heartbeat >= max(2.0, settings.log_heartbeat_seconds):
+        if time.monotonic() - last_heartbeat >= max(
+            2.0, settings.log_heartbeat_seconds
+        ):
             yield sse_message("heartbeat", {"at": datetime.now(UTC).isoformat()})
             last_heartbeat = time.monotonic()
 
 
 @app.get("/api/admin/logs/client/stream")
-async def stream_client_logs(request: Request, _: Auth, after: int | None = None, tail: int = 200):
+async def stream_client_logs(
+    request: Request, _: Auth, after: int | None = None, tail: int = 200
+):
     if not await stream_limiter.acquire():
         raise HTTPException(429, "实时日志连接数已达上限")
     source = client_log_stream(request, after=after, tail=tail)
@@ -499,7 +1211,11 @@ async def stream_client_logs(request: Request, _: Auth, after: int | None = None
 async def backend_log_stream(request: Request, *, source: str, tail: int):
     yield sse_message(
         "metadata",
-        {"source_type": "backend", "source": source, "heartbeat_seconds": settings.log_heartbeat_seconds},
+        {
+            "source_type": "backend",
+            "source": source,
+            "heartbeat_seconds": settings.log_heartbeat_seconds,
+        },
     )
     iterator = docker_log_source.follow(source, tail=tail).__aiter__()
     pending: asyncio.Task | None = None
@@ -507,24 +1223,34 @@ async def backend_log_stream(request: Request, *, source: str, tail: int):
         while not await request.is_disconnected():
             if pending is None:
                 pending = asyncio.create_task(anext(iterator))
-            done, _ = await asyncio.wait({pending}, timeout=max(2.0, settings.log_heartbeat_seconds))
+            done, _ = await asyncio.wait(
+                {pending}, timeout=max(2.0, settings.log_heartbeat_seconds)
+            )
             if not done:
                 yield sse_message("heartbeat", {"at": datetime.now(UTC).isoformat()})
                 continue
             try:
                 event = pending.result()
             except StopAsyncIteration:
-                yield sse_message("source_status", {"status": "ended", "source": source})
+                yield sse_message(
+                    "source_status", {"status": "ended", "source": source}
+                )
                 break
             pending = None
             yield sse_message("log", event.to_dict(), cursor=event.cursor)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        logger.warning("Backend log source %s unavailable: %s", source, type(exc).__name__)
+        logger.warning(
+            "Backend log source %s unavailable: %s", source, type(exc).__name__
+        )
         yield sse_message(
             "source_status",
-            {"status": "unavailable", "source": source, "message": "后端日志源暂不可用"},
+            {
+                "status": "unavailable",
+                "source": source,
+                "message": "后端日志源暂不可用",
+            },
         )
     finally:
         if pending and not pending.done():
@@ -540,7 +1266,9 @@ async def stream_backend_logs(request: Request, _: Auth, source: str, tail: int 
         raise HTTPException(503, "后端日志读取尚未启用或 Docker socket 不可用")
     if not await stream_limiter.acquire():
         raise HTTPException(429, "实时日志连接数已达上限")
-    stream = backend_log_stream(request, source=source, tail=min(max(tail, 1), settings.log_tail_limit))
+    stream = backend_log_stream(
+        request, source=source, tail=min(max(tail, 1), settings.log_tail_limit)
+    )
     return StreamingResponse(
         limited_stream(stream, stream_limiter),
         media_type="text/event-stream",
@@ -569,9 +1297,15 @@ def dashboard(_: Auth, db: Db):
         "media": db.scalar(select(func.count()).select_from(MediaAsset)) or 0,
         "journeys": db.scalar(select(func.count()).select_from(Journey)) or 0,
     }
-    missing_challenges = db.scalar(
-        select(func.count()).select_from(Stop).outerjoin(Challenge, Challenge.stop_id == Stop.id).where(Challenge.id.is_(None))
-    ) or 0
+    missing_challenges = (
+        db.scalar(
+            select(func.count())
+            .select_from(Stop)
+            .outerjoin(Challenge, Challenge.stop_id == Stop.id)
+            .where(Challenge.id.is_(None))
+        )
+        or 0
+    )
     recent_rows = db.execute(
         select(Route, City.name, func.count(Stop.id))
         .join(City, City.id == Route.city_id)
@@ -583,7 +1317,10 @@ def dashboard(_: Auth, db: Db):
     return {
         **counts,
         "missing_challenges": missing_challenges,
-        "recent_routes": [route_dict(route, city_name, stop_count) for route, city_name, stop_count in recent_rows],
+        "recent_routes": [
+            route_dict(route, city_name, stop_count)
+            for route, city_name, stop_count in recent_rows
+        ],
     }
 
 
@@ -619,7 +1356,9 @@ def delete_city(item_id: str, _: Auth, db: Db):
     item = db.get(City, item_id)
     if not item:
         raise HTTPException(404, "城市不存在")
-    if db.scalar(select(func.count()).select_from(Route).where(Route.city_id == item_id)):
+    if db.scalar(
+        select(func.count()).select_from(Route).where(Route.city_id == item_id)
+    ):
         raise HTTPException(409, "请先删除或迁移该城市下的路线")
     db.delete(item)
     db.commit()
@@ -637,8 +1376,13 @@ def list_routes(_: Auth, db: Db, city_id: str | None = None, q: str = ""):
     if city_id:
         statement = statement.where(Route.city_id == city_id)
     if q:
-        statement = statement.where(or_(Route.title.contains(q), Route.slug.contains(q)))
-    return [route_dict(route, city_name, stop_count) for route, city_name, stop_count in db.execute(statement)]
+        statement = statement.where(
+            or_(Route.title.contains(q), Route.slug.contains(q))
+        )
+    return [
+        route_dict(route, city_name, stop_count)
+        for route, city_name, stop_count in db.execute(statement)
+    ]
 
 
 @app.post("/api/admin/routes", status_code=201)
@@ -675,7 +1419,9 @@ def delete_route(item_id: str, _: Auth, db: Db):
     item = db.get(Route, item_id)
     if not item:
         raise HTTPException(404, "路线不存在")
-    if db.scalar(select(func.count()).select_from(Journey).where(Journey.route_id == item_id)):
+    if db.scalar(
+        select(func.count()).select_from(Journey).where(Journey.route_id == item_id)
+    ):
         raise HTTPException(409, "该路线已有用户行程记录，不能删除；可改为草稿状态")
     stop_ids = list(db.scalars(select(Stop.id).where(Stop.route_id == item_id)))
     if stop_ids:
@@ -696,8 +1442,13 @@ def list_stops(_: Auth, db: Db, route_id: str | None = None, q: str = ""):
     if route_id:
         statement = statement.where(Stop.route_id == route_id)
     if q:
-        statement = statement.where(or_(Stop.title.contains(q), Stop.story_title.contains(q)))
-    return [stop_dict(stop, route_title, bool(challenge_id)) for stop, route_title, challenge_id in db.execute(statement)]
+        statement = statement.where(
+            or_(Stop.title.contains(q), Stop.story_title.contains(q))
+        )
+    return [
+        stop_dict(stop, route_title, bool(challenge_id))
+        for stop, route_title, challenge_id in db.execute(statement)
+    ]
 
 
 @app.post("/api/admin/stops", status_code=201)
@@ -726,7 +1477,11 @@ def delete_stop(item_id: str, _: Auth, db: Db):
     item = db.get(Stop, item_id)
     if not item:
         raise HTTPException(404, "站点不存在")
-    if db.scalar(select(func.count()).select_from(JourneyAnswer).where(JourneyAnswer.stop_id == item_id)):
+    if db.scalar(
+        select(func.count())
+        .select_from(JourneyAnswer)
+        .where(JourneyAnswer.stop_id == item_id)
+    ):
         raise HTTPException(409, "该站点已有用户答题记录，不能删除")
     db.execute(delete(Challenge).where(Challenge.stop_id == item_id))
     db.delete(item)
@@ -743,7 +1498,10 @@ def list_challenges(_: Auth, db: Db, route_id: str | None = None):
     )
     if route_id:
         statement = statement.where(Route.id == route_id)
-    return [challenge_dict(item, stop_title, route_title) for item, stop_title, route_title in db.execute(statement)]
+    return [
+        challenge_dict(item, stop_title, route_title)
+        for item, stop_title, route_title in db.execute(statement)
+    ]
 
 
 @app.post("/api/admin/challenges", status_code=201)
@@ -788,7 +1546,9 @@ def delete_challenge(item_id: str, _: Auth, db: Db):
 def list_media(request: Request, _: Auth, db: Db, q: str = ""):
     statement = select(MediaAsset).order_by(MediaAsset.updated_at.desc())
     if q:
-        statement = statement.where(or_(MediaAsset.key.contains(q), MediaAsset.storage_path.contains(q)))
+        statement = statement.where(
+            or_(MediaAsset.key.contains(q), MediaAsset.storage_path.contains(q))
+        )
     base = str(request.base_url).rstrip("/")
     return [
         {
@@ -802,7 +1562,8 @@ def list_media(request: Request, _: Auth, db: Db, q: str = ""):
             "checksum_sha256": item.checksum_sha256,
             "created_at": iso(item.created_at),
             "updated_at": iso(item.updated_at),
-            "preview_url": item.canonical_url or f"{base}/media/{item.object_key or item.storage_path}",
+            "preview_url": item.canonical_url
+            or f"{base}/media/{item.object_key or item.storage_path}",
         }
         for item in db.scalars(statement)
     ]
@@ -823,14 +1584,25 @@ def upload_media(
     payload = file.file.read(settings.max_upload_mb * 1024 * 1024 + 1)
     if len(payload) > settings.max_upload_mb * 1024 * 1024:
         raise HTTPException(413, f"文件不能超过 {settings.max_upload_mb}MB")
-    safe_name = re.sub(r"[^a-zA-Z0-9._-]", "-", Path(file.filename).name).strip(".-") or "asset"
-    asset_key = re.sub(r"[^a-zA-Z0-9_-]", "-", key.strip()).strip("-") or Path(safe_name).stem
+    safe_name = (
+        re.sub(r"[^a-zA-Z0-9._-]", "-", Path(file.filename).name).strip(".-") or "asset"
+    )
+    asset_key = (
+        re.sub(r"[^a-zA-Z0-9_-]", "-", key.strip()).strip("-") or Path(safe_name).stem
+    )
     checksum = hashlib.sha256(payload).hexdigest()
     existing = db.get(MediaAsset, asset_key)
     if existing:
         if existing.checksum_sha256 == checksum:
-            return {"key": existing.key, "storage_path": existing.storage_path, "mime_type": existing.mime_type, "idempotent": True}
-        raise HTTPException(409, "资源标识已存在；请更换标识，避免已发布内容引用被静默替换")
+            return {
+                "key": existing.key,
+                "storage_path": existing.storage_path,
+                "mime_type": existing.mime_type,
+                "idempotent": True,
+            }
+        raise HTTPException(
+            409, "资源标识已存在；请更换标识，避免已发布内容引用被静默替换"
+        )
     now = datetime.now(UTC)
     suffix = Path(safe_name).suffix.lower()
     object_key = f"public/content/{now:%Y/%m}/{checksum}{suffix}"
@@ -863,7 +1635,13 @@ def upload_media(
         if uploaded_now:
             public_object_storage.delete(object_key)
         raise
-    return {"key": item.key, "storage_path": item.storage_path, "mime_type": item.mime_type, "storage_provider": item.storage_provider, "canonical_url": item.canonical_url}
+    return {
+        "key": item.key,
+        "storage_path": item.storage_path,
+        "mime_type": item.mime_type,
+        "storage_provider": item.storage_provider,
+        "canonical_url": item.canonical_url,
+    }
 
 
 @app.delete("/api/admin/media/{asset_key}", status_code=204)
@@ -872,12 +1650,59 @@ def delete_media(asset_key: str, _: Auth, db: Db):
     if not item:
         raise HTTPException(404, "媒体资源不存在")
     references = (
-        (db.scalar(select(func.count()).select_from(City).where(City.hero_image == item.storage_path)) or 0)
-        + (db.scalar(select(func.count()).select_from(Route).where(Route.hero_image == item.storage_path)) or 0)
-        + (db.scalar(select(func.count()).select_from(Stop).where(or_(Stop.image == item.storage_path, Stop.audio_url == item.storage_path))) or 0)
-        + (db.scalar(select(func.count()).select_from(StoryFragment).where(StoryFragment.audio_path == item.storage_path)) or 0)
-        + (db.scalar(select(func.count()).select_from(HomeStoryPublication).where(HomeStoryPublication.cover_image == item.storage_path)) or 0)
-        + (db.scalar(select(func.count()).select_from(StoryNarrationTrack).where(StoryNarrationTrack.media_path == item.storage_path)) or 0)
+        (
+            db.scalar(
+                select(func.count())
+                .select_from(City)
+                .where(City.hero_image == item.storage_path)
+            )
+            or 0
+        )
+        + (
+            db.scalar(
+                select(func.count())
+                .select_from(Route)
+                .where(Route.hero_image == item.storage_path)
+            )
+            or 0
+        )
+        + (
+            db.scalar(
+                select(func.count())
+                .select_from(Stop)
+                .where(
+                    or_(
+                        Stop.image == item.storage_path,
+                        Stop.audio_url == item.storage_path,
+                    )
+                )
+            )
+            or 0
+        )
+        + (
+            db.scalar(
+                select(func.count())
+                .select_from(StoryFragment)
+                .where(StoryFragment.audio_path == item.storage_path)
+            )
+            or 0
+        )
+        + (
+            db.scalar(
+                select(func.count())
+                .select_from(HomeStoryPublication)
+                .where(HomeStoryPublication.cover_image == item.storage_path)
+            )
+            or 0
+        )
+        + (
+            db.scalar(
+                select(func.count())
+                .select_from(StoryNarrationTrack)
+                .where(StoryNarrationTrack.media_path == item.storage_path)
+            )
+            or 0
+        )
     )
     if references:
         raise HTTPException(409, f"该资源正在被 {references} 处内容使用，不能删除")
@@ -933,7 +1758,9 @@ def narration_preview_dict(item: NarrationPreview) -> dict[str, Any]:
         "created_at": iso(item.created_at),
         "expires_at": iso(item.expires_at),
         "approved_at": iso(item.approved_at),
-        "playback_path": f"/narration/previews/{item.id}/audio" if item.status in {"ready", "approved"} else None,
+        "playback_path": f"/narration/previews/{item.id}/audio"
+        if item.status in {"ready", "approved"}
+        else None,
     }
 
 
@@ -996,7 +1823,9 @@ def ensure_default_narration_profile(db: Session) -> NarrationVoiceProfile:
         db.flush()
     fragments = list(db.scalars(select(StoryFragment)))
     for fragment in fragments:
-        transcript_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
+        transcript_hash = hashlib.sha256(
+            fragment.narration_script.strip().encode()
+        ).hexdigest()
         track = db.scalar(
             select(FragmentNarrationTrack).where(
                 FragmentNarrationTrack.fragment_id == fragment.id,
@@ -1071,14 +1900,20 @@ def narration_profile_coverage(
         if arc
         else []
     )
-    rows = list(
-        db.scalars(
-            select(FragmentNarrationTrack).where(
-                FragmentNarrationTrack.profile_id == profile_id,
-                FragmentNarrationTrack.fragment_id.in_([item.id for item in fragments]),
+    rows = (
+        list(
+            db.scalars(
+                select(FragmentNarrationTrack).where(
+                    FragmentNarrationTrack.profile_id == profile_id,
+                    FragmentNarrationTrack.fragment_id.in_(
+                        [item.id for item in fragments]
+                    ),
+                )
             )
         )
-    ) if fragments else []
+        if fragments
+        else []
+    )
     by_fragment: dict[str, list[FragmentNarrationTrack]] = {}
     for row in rows:
         by_fragment.setdefault(row.fragment_id, []).append(row)
@@ -1086,7 +1921,9 @@ def narration_profile_coverage(
     stale: list[dict[str, str]] = []
     complete: list[str] = []
     for fragment in fragments:
-        expected_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
+        expected_hash = hashlib.sha256(
+            fragment.narration_script.strip().encode()
+        ).hexdigest()
         current = next(
             (
                 row
@@ -1129,7 +1966,9 @@ def persist_formal_narration_track(
     source_preview_id: str | None = None,
 ) -> tuple[FragmentNarrationTrack, MediaAsset, str, bool]:
     """Promote generated bytes through the single immutable formal-track path."""
-    transcript_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
+    transcript_hash = hashlib.sha256(
+        fragment.narration_script.strip().encode()
+    ).hexdigest()
     audio_hash = hashlib.sha256(audio).hexdigest()
     version = re.sub(r"[^a-zA-Z0-9._-]", "-", fragment.script_version) or "v1"
     settings_hash = hashlib.sha256(
@@ -1170,7 +2009,9 @@ def persist_formal_narration_track(
                 mime_type="audio/mpeg",
                 storage_provider=public_object_storage.provider,
                 object_key=object_key,
-                canonical_url=canonical_url if public_object_storage.provider == "oss" else None,
+                canonical_url=canonical_url
+                if public_object_storage.provider == "oss"
+                else None,
                 visibility="public",
                 size_bytes=len(audio),
                 checksum_sha256=audio_hash,
@@ -1222,7 +2063,9 @@ def persist_formal_narration_track(
             try:
                 public_object_storage.delete(object_key)
             except Exception:
-                logger.exception("Failed to clean orphaned narration object %s", object_key)
+                logger.exception(
+                    "Failed to clean orphaned narration object %s", object_key
+                )
         raise
 
 
@@ -1232,9 +2075,7 @@ def story_transcript_hash(arc: StoryArc) -> str:
 
 def home_story_defaults(arc: StoryArc, route: Route | None) -> tuple[str, str]:
     introduction = (
-        str(route.subtitle or "").strip()
-        if route is not None
-        else ""
+        str(route.subtitle or "").strip() if route is not None else ""
     ) or f"戴上耳机，听听「{arc.title}」的完整故事。"
     cover_image = str(route.hero_image or "").strip() if route is not None else ""
     return introduction, cover_image
@@ -1326,8 +2167,7 @@ def home_story_dict(db: Session, arc: StoryArc) -> dict[str, Any]:
                 "title": publication.title,
                 "introduction": publication.introduction.strip()
                 or default_introduction,
-                "cover_image": publication.cover_image.strip()
-                or default_cover_image,
+                "cover_image": publication.cover_image.strip() or default_cover_image,
                 "selection_weight": publication.selection_weight,
                 "status": publication.status,
                 "selected_track_id": publication.selected_track_id,
@@ -1387,8 +2227,7 @@ def save_home_story(arc_id: str, payload: dict[str, Any], _: Auth, db: Db):
         or default_introduction
     )
     cover_image = (
-        str(payload.get("cover_image", item.cover_image)).strip()
-        or default_cover_image
+        str(payload.get("cover_image", item.cover_image)).strip() or default_cover_image
     )
     try:
         selection_weight = int(payload.get("selection_weight", item.selection_weight))
@@ -1426,7 +2265,10 @@ def generate_home_story_track(arc_id: str, payload: dict[str, Any], _: Auth, db:
     profile = db.get(NarrationVoiceProfile, profile_id)
     if profile is None or profile.status == "archived":
         raise HTTPException(404, "音色档案不存在")
-    if settings.narration_provider == "minimax" and not settings.minimax_api_key.strip():
+    if (
+        settings.narration_provider == "minimax"
+        and not settings.minimax_api_key.strip()
+    ):
         raise HTTPException(503, "尚未配置 MiniMax 语音凭证")
     try:
         result = narration_synthesizer.synthesize(
@@ -1611,7 +2453,11 @@ def upload_home_story_track(
                     visibility="public",
                     size_bytes=len(payload),
                     checksum_sha256=checksum,
-                    metadata_json={"kind": "home_story", "arc_id": arc.id, "source": "manual"},
+                    metadata_json={
+                        "kind": "home_story",
+                        "arc_id": arc.id,
+                        "source": "manual",
+                    },
                     created_at=now,
                     updated_at=now,
                 )
@@ -1645,7 +2491,10 @@ def upload_home_story_track(
         track.size_bytes = len(payload)
         track.duration_ms = duration_ms
         track.checksum_sha256 = checksum
-        track.generation_metadata_json = {"source": "manual_upload", "filename": file.filename}
+        track.generation_metadata_json = {
+            "source": "manual_upload",
+            "filename": file.filename,
+        }
         track.status = "in_review"
         track.reviewed_by = None
         track.reviewed_at = None
@@ -1690,6 +2539,7 @@ def stream_home_story_track(track_id: str, _: Auth, db: Db):
         stream = public_object_storage.open(track.media_path)
     except FileNotFoundError as error:
         raise HTTPException(404, "音频文件不存在") from error
+
     def chunks():
         with stream:
             while payload := stream.read(64 * 1024):
@@ -1706,7 +2556,11 @@ def transition_home_story(arc_id: str, action: str, _: Auth, db: Db):
     )
     if item is None:
         raise HTTPException(409, "请先保存首页故事卡片")
-    track = db.get(StoryNarrationTrack, item.selected_track_id) if item.selected_track_id else None
+    track = (
+        db.get(StoryNarrationTrack, item.selected_track_id)
+        if item.selected_track_id
+        else None
+    )
     now = datetime.now(UTC)
     if action == "submit-review":
         if item.status not in {"draft", "withdrawn"}:
@@ -1723,7 +2577,10 @@ def transition_home_story(arc_id: str, action: str, _: Auth, db: Db):
             raise HTTPException(409, "请先提交审核")
         if track is None or track.arc_id != arc.id:
             raise HTTPException(422, "请先选择完整故事音频")
-        if track.transcript_hash != story_transcript_hash(arc) or track.script_version != arc.script_version:
+        if (
+            track.transcript_hash != story_transcript_hash(arc)
+            or track.script_version != arc.script_version
+        ):
             raise HTTPException(409, "音频已过期，请按当前正文重新生成")
         item.status = "approved"
         item.reviewed_by = "admin"
@@ -1740,7 +2597,10 @@ def transition_home_story(arc_id: str, action: str, _: Auth, db: Db):
             raise HTTPException(409, "所属路线尚未发布")
         if track is None or track.status != "approved":
             raise HTTPException(409, "完整故事音频尚未审核通过")
-        if track.transcript_hash != story_transcript_hash(arc) or track.script_version != arc.script_version:
+        if (
+            track.transcript_hash != story_transcript_hash(arc)
+            or track.script_version != arc.script_version
+        ):
             raise HTTPException(409, "音频已过期，请按当前正文重新生成")
         if item.selection_weight <= 0:
             raise HTTPException(422, "随机权重必须大于 0")
@@ -1793,7 +2653,9 @@ def create_narration_profile(payload: dict[str, Any], _: Auth, db: Db):
     voice_id = str(payload.get("voice_id") or "").strip()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,78}", slug) or not name or not voice_id:
         raise HTTPException(422, "slug、显示名称和 Voice ID 格式不正确")
-    if db.scalar(select(NarrationVoiceProfile).where(NarrationVoiceProfile.slug == slug)):
+    if db.scalar(
+        select(NarrationVoiceProfile).where(NarrationVoiceProfile.slug == slug)
+    ):
         raise HTTPException(409, "音色 slug 已存在")
     now = datetime.now(UTC)
     item = NarrationVoiceProfile(
@@ -1819,13 +2681,18 @@ def create_narration_profile(payload: dict[str, Any], _: Auth, db: Db):
 
 
 @app.put("/api/admin/narration/profiles/{profile_id}")
-def update_narration_profile(
-    profile_id: str, payload: dict[str, Any], _: Auth, db: Db
-):
+def update_narration_profile(profile_id: str, payload: dict[str, Any], _: Auth, db: Db):
     item = db.get(NarrationVoiceProfile, profile_id)
     if item is None:
         raise HTTPException(404, "音色不存在")
-    for key in ("display_name", "description", "provider", "model", "voice_id", "emotion"):
+    for key in (
+        "display_name",
+        "description",
+        "provider",
+        "model",
+        "voice_id",
+        "emotion",
+    ):
         if key in payload:
             setattr(item, key, str(payload[key]).strip())
     if "speed" in payload:
@@ -1835,9 +2702,16 @@ def update_narration_profile(
     if "display_order" in payload:
         item.display_order = int(payload["display_order"])
     if "preview_media_path" in payload:
-        item.preview_media_path = str(payload["preview_media_path"] or "").strip() or None
-    if not item.is_default and item.status == "published" and any(
-        key in payload for key in ("provider", "model", "voice_id", "emotion", "speed", "pitch")
+        item.preview_media_path = (
+            str(payload["preview_media_path"] or "").strip() or None
+        )
+    if (
+        not item.is_default
+        and item.status == "published"
+        and any(
+            key in payload
+            for key in ("provider", "model", "voice_id", "emotion", "speed", "pitch")
+        )
     ):
         item.status = "draft"
         item.published_at = None
@@ -1853,9 +2727,7 @@ def get_narration_coverage(route_id: str, profile_id: str, _: Auth, db: Db):
 
 
 @app.post("/api/admin/routes/{route_id}/narration/generate", status_code=201)
-def generate_route_narration(
-    route_id: str, payload: dict[str, Any], _: Auth, db: Db
-):
+def generate_route_narration(route_id: str, payload: dict[str, Any], _: Auth, db: Db):
     default_profile = ensure_default_narration_profile(db)
     profile_id = str(payload.get("profile_id") or default_profile.id)
     profile = db.get(NarrationVoiceProfile, profile_id)
@@ -1864,7 +2736,10 @@ def generate_route_narration(
         raise HTTPException(404, "路线不存在")
     if profile is None or profile.status == "archived":
         raise HTTPException(422, "请选择可编辑的音色档案")
-    if settings.narration_provider == "minimax" and not settings.minimax_api_key.strip():
+    if (
+        settings.narration_provider == "minimax"
+        and not settings.minimax_api_key.strip()
+    ):
         raise HTTPException(503, "MiniMax 凭证未配置，无法生成路线旁白")
     arc = db.scalar(select(StoryArc).where(StoryArc.route_id == route_id))
     fragments = (
@@ -1886,8 +2761,7 @@ def generate_route_narration(
         {item.id for item in fragments}
         if regenerate_all
         else {
-            item["id"]
-            for item in coverage_before["missing"] + coverage_before["stale"]
+            item["id"] for item in coverage_before["missing"] + coverage_before["stale"]
         }
     )
     targets = [item for item in fragments if item.id in target_ids]
@@ -1910,7 +2784,9 @@ def generate_route_narration(
         except NarrationSynthesisError as error:
             return fragment, None, error.code
         except Exception:
-            logger.exception("Route narration generation failed for fragment %s", fragment.id)
+            logger.exception(
+                "Route narration generation failed for fragment %s", fragment.id
+            )
             return fragment, None, "provider_error"
 
     generated = []
@@ -1965,7 +2841,9 @@ def generate_route_narration(
             db.rollback()
             if uploaded and uploaded_key:
                 public_object_storage.delete(uploaded_key)
-            logger.exception("Route narration storage failed for fragment %s", fragment.id)
+            logger.exception(
+                "Route narration storage failed for fragment %s", fragment.id
+            )
             results.append(
                 {
                     "fragment_id": fragment.id,
@@ -2026,14 +2904,18 @@ def publish_narration_profile(
         raise HTTPException(404, "音色不存在")
     coverage = narration_profile_coverage(db, route_id, profile_id)
     if not coverage["ready"]:
-        raise HTTPException(409, {"message": "音色尚未覆盖整条路线", "coverage": coverage})
+        raise HTTPException(
+            409, {"message": "音色尚未覆盖整条路线", "coverage": coverage}
+        )
     now = datetime.now(UTC)
     item.status = "published"
     item.published_at = now
     item.updated_at = now
     for fragment_id in coverage["complete_fragment_ids"]:
         fragment = db.get(StoryFragment, fragment_id)
-        transcript_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
+        transcript_hash = hashlib.sha256(
+            fragment.narration_script.strip().encode()
+        ).hexdigest()
         track = db.scalar(
             select(FragmentNarrationTrack).where(
                 FragmentNarrationTrack.fragment_id == fragment_id,
@@ -2079,8 +2961,13 @@ def set_default_narration_profile(profile_id: str, _: Auth, db: Db):
     )
     for track in tracks:
         fragment = db.get(StoryFragment, track.fragment_id)
-        expected_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
-        if track.transcript_hash == expected_hash and track.script_version == fragment.script_version:
+        expected_hash = hashlib.sha256(
+            fragment.narration_script.strip().encode()
+        ).hexdigest()
+        if (
+            track.transcript_hash == expected_hash
+            and track.script_version == fragment.script_version
+        ):
             fragment.audio_path = track.media_path
             fragment.audio_mime_type = track.mime_type
             fragment.audio_size_bytes = track.size_bytes
@@ -2095,7 +2982,8 @@ def narration_config(_: Auth):
         "model": narration_synthesizer.model,
         "default_voice_id": settings.minimax_voice_id,
         "credentials_configured": (
-            settings.narration_provider == "fake" or bool(settings.minimax_api_key.strip())
+            settings.narration_provider == "fake"
+            or bool(settings.minimax_api_key.strip())
         ),
         "supported_emotions": [
             "neutral",
@@ -2111,7 +2999,9 @@ def narration_config(_: Auth):
 
 
 @app.post("/api/admin/fragments/{fragment_id}/narration/previews", status_code=201)
-def generate_narration_previews(fragment_id: str, payload: dict[str, Any], _: Auth, db: Db):
+def generate_narration_previews(
+    fragment_id: str, payload: dict[str, Any], _: Auth, db: Db
+):
     fragment = db.get(StoryFragment, fragment_id)
     if fragment is None:
         raise HTTPException(404, "故事碎片不存在")
@@ -2152,20 +3042,32 @@ def generate_narration_previews(fragment_id: str, payload: dict[str, Any], _: Au
             status="pending",
             metadata_json={"label": str(variant.get("label") or emotion)},
             created_at=now,
-            expires_at=now + timedelta(hours=max(1, settings.narration_preview_ttl_hours)),
+            expires_at=now
+            + timedelta(hours=max(1, settings.narration_preview_ttl_hours)),
         )
         try:
-            result = narration_synthesizer.synthesize(NarrationRequest(transcript, voice_id, emotion, speed, pitch, pronunciation))
+            result = narration_synthesizer.synthesize(
+                NarrationRequest(
+                    transcript, voice_id, emotion, speed, pitch, pronunciation
+                )
+            )
             object_key = f"private/narration-previews/{fragment.id}/{preview_id}.mp3"
             private_object_storage.put(object_key, result.payload, result.mime_type)
             preview.object_key = object_key
             preview.status = "ready"
-            preview.metadata_json = {**preview.metadata_json, "mime_type": result.mime_type, "size_bytes": len(result.payload), "request_id": result.request_id}
+            preview.metadata_json = {
+                **preview.metadata_json,
+                "mime_type": result.mime_type,
+                "size_bytes": len(result.payload),
+                "request_id": result.request_id,
+            }
         except NarrationSynthesisError as error:
             preview.status = "failed"
             preview.error_code = error.code
         except Exception:
-            logger.exception("Narration preview storage failed for fragment %s", fragment.id)
+            logger.exception(
+                "Narration preview storage failed for fragment %s", fragment.id
+            )
             preview.status = "failed"
             preview.error_code = "storage_unavailable"
         db.add(preview)
@@ -2177,7 +3079,11 @@ def generate_narration_previews(fragment_id: str, payload: dict[str, Any], _: Au
 @app.get("/api/admin/narration/previews/{preview_id}/audio")
 def stream_narration_preview(preview_id: str, _: Auth, db: Db):
     preview = db.get(NarrationPreview, preview_id)
-    if preview is None or preview.status not in {"ready", "approved"} or not preview.object_key:
+    if (
+        preview is None
+        or preview.status not in {"ready", "approved"}
+        or not preview.object_key
+    ):
         raise HTTPException(404, "试听音频不存在或已过期")
     now = datetime.now(UTC)
     if preview.expires_at.tzinfo is None:
@@ -2185,10 +3091,12 @@ def stream_narration_preview(preview_id: str, _: Auth, db: Db):
     if preview.expires_at < now and preview.status != "approved":
         raise HTTPException(410, "试听音频已过期")
     mime_type = str(preview.metadata_json.get("mime_type") or "audio/mpeg")
+
     def chunks():
         with private_object_storage.open(preview.object_key) as source:
             while payload := source.read(64 * 1024):
                 yield payload
+
     return StreamingResponse(chunks(), media_type=mime_type)
 
 
@@ -2200,7 +3108,9 @@ def approve_narration_preview(preview_id: str, _: Auth, db: Db):
     fragment = db.get(StoryFragment, preview.fragment_id)
     if fragment is None:
         raise HTTPException(404, "故事碎片不存在")
-    transcript_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
+    transcript_hash = hashlib.sha256(
+        fragment.narration_script.strip().encode()
+    ).hexdigest()
     if transcript_hash != preview.transcript_hash:
         raise HTTPException(409, "文字稿已变化，请重新生成试听版本")
     profile = db.get(
@@ -2255,7 +3165,14 @@ def approve_narration_preview(preview_id: str, _: Auth, db: Db):
 
 @app.post("/api/admin/narration/previews/cleanup")
 def cleanup_narration_previews(_: Auth, db: Db):
-    rows = list(db.scalars(select(NarrationPreview).where(NarrationPreview.expires_at < datetime.now(UTC), NarrationPreview.status != "approved")))
+    rows = list(
+        db.scalars(
+            select(NarrationPreview).where(
+                NarrationPreview.expires_at < datetime.now(UTC),
+                NarrationPreview.status != "approved",
+            )
+        )
+    )
     removed = 0
     for item in rows:
         if item.object_key:
@@ -2290,7 +3207,11 @@ def import_content(payload: dict[str, Any], _: Auth, db: Db):
             raw = dict(raw_city)
             supplied_city_id = raw.pop("id", None)
             data = CityInput.model_validate(raw)
-            city_id = supplied_city_id or db.scalar(select(City.id).where(City.slug == data.slug)) or str(uuid4())
+            city_id = (
+                supplied_city_id
+                or db.scalar(select(City.id).where(City.slug == data.slug))
+                or str(uuid4())
+            )
             upsert(db, City, city_id, data.model_dump())
             city_ids[data.slug] = city_id
             counts["cities"] += 1
@@ -2303,9 +3224,15 @@ def import_content(payload: dict[str, Any], _: Auth, db: Db):
             supplied_route_id = raw.pop("id", None)
             city_slug = raw.pop("city_slug", None)
             if city_slug and not raw.get("city_id"):
-                raw["city_id"] = city_ids.get(city_slug) or db.scalar(select(City.id).where(City.slug == city_slug))
+                raw["city_id"] = city_ids.get(city_slug) or db.scalar(
+                    select(City.id).where(City.slug == city_slug)
+                )
             data = RouteInput.model_validate(raw)
-            route_id = supplied_route_id or db.scalar(select(Route.id).where(Route.slug == data.slug)) or str(uuid4())
+            route_id = (
+                supplied_route_id
+                or db.scalar(select(Route.id).where(Route.slug == data.slug))
+                or str(uuid4())
+            )
             values = data.model_dump()
             values["content_status"] = "draft"
             values["published_at"] = None
@@ -2323,11 +3250,19 @@ def import_content(payload: dict[str, Any], _: Auth, db: Db):
             supplied_stop_id = raw.pop("id", None)
             route_slug = raw.pop("route_slug", None)
             if route_slug and not raw.get("route_id"):
-                raw["route_id"] = route_ids.get(route_slug) or db.scalar(select(Route.id).where(Route.slug == route_slug))
+                raw["route_id"] = route_ids.get(route_slug) or db.scalar(
+                    select(Route.id).where(Route.slug == route_slug)
+                )
             data = StopInput.model_validate(raw)
-            stop_id = supplied_stop_id or db.scalar(
-                select(Stop.id).where(Stop.route_id == data.route_id, Stop.position == data.position)
-            ) or str(uuid4())
+            stop_id = (
+                supplied_stop_id
+                or db.scalar(
+                    select(Stop.id).where(
+                        Stop.route_id == data.route_id, Stop.position == data.position
+                    )
+                )
+                or str(uuid4())
+            )
             upsert(db, Stop, stop_id, stop_values(data))
             stop_ids[f"{data.route_id}:{data.position}"] = stop_id
             if nested_challenge:
@@ -2345,7 +3280,9 @@ def import_content(payload: dict[str, Any], _: Auth, db: Db):
                 raise ValueError("正确答案序号超出选项范围")
             values = data.model_dump()
             values["options_json"] = values.pop("options")
-            existing_id = db.scalar(select(Challenge.id).where(Challenge.stop_id == data.stop_id))
+            existing_id = db.scalar(
+                select(Challenge.id).where(Challenge.stop_id == data.stop_id)
+            )
             upsert(db, Challenge, existing_id or challenge_id, values)
             counts["challenges"] += 1
 
@@ -2372,7 +3309,11 @@ def _published_route_locked(db: Session, route: Route) -> bool:
     if route.content_status != "published" or route.published_at is None:
         return False
     return bool(
-        db.scalar(select(func.count()).select_from(Journey).where(Journey.route_id == route.id))
+        db.scalar(
+            select(func.count())
+            .select_from(Journey)
+            .where(Journey.route_id == route.id)
+        )
     )
 
 
@@ -2400,7 +3341,9 @@ def _route_content(db: Session, route: Route) -> dict[str, Any]:
     fragment_ids = [item.id for item in fragments]
     stops = {
         item.id: item
-        for item in db.scalars(select(Stop).where(Stop.id.in_([x.stop_id for x in fragments if x.stop_id])))
+        for item in db.scalars(
+            select(Stop).where(Stop.id.in_([x.stop_id for x in fragments if x.stop_id]))
+        )
     }
     regions = {
         item.fragment_id: item
@@ -2416,15 +3359,23 @@ def _route_content(db: Session, route: Route) -> dict[str, Any]:
     }
     dependency_map: dict[str, list[str]] = {}
     for row in db.scalars(
-        select(FragmentDependency).where(FragmentDependency.fragment_id.in_(fragment_ids))
+        select(FragmentDependency).where(
+            FragmentDependency.fragment_id.in_(fragment_ids)
+        )
     ):
         dependency_map.setdefault(row.fragment_id, []).append(row.required_fragment_id)
     claim_map: dict[str, list[str]] = {}
-    for row in db.scalars(select(FragmentClaim).where(FragmentClaim.fragment_id.in_(fragment_ids))):
+    for row in db.scalars(
+        select(FragmentClaim).where(FragmentClaim.fragment_id.in_(fragment_ids))
+    ):
         claim_map.setdefault(row.fragment_id, []).append(row.claim_id)
-    route_claim_ids = sorted({value for values in claim_map.values() for value in values})
+    route_claim_ids = sorted(
+        {value for values in claim_map.values() for value in values}
+    )
     claims = list(
-        db.scalars(select(HistoricalClaim).where(HistoricalClaim.id.in_(route_claim_ids)))
+        db.scalars(
+            select(HistoricalClaim).where(HistoricalClaim.id.in_(route_claim_ids))
+        )
     )
     support_map: dict[str, list[ClaimSource]] = {}
     support_rows = list(
@@ -2614,7 +3565,8 @@ def _route_content(db: Session, route: Route) -> dict[str, Any]:
                 "reviewed_at": iso(item.reviewed_at),
                 "source_ids": [row.source_id for row in support_map.get(item.id, [])],
                 "support_notes": {
-                    row.source_id: row.support_note for row in support_map.get(item.id, [])
+                    row.source_id: row.support_note
+                    for row in support_map.get(item.id, [])
                 },
             }
             for item in claims
@@ -2643,10 +3595,12 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
     ):
         if key in route_data:
             setattr(route, key, route_data[key])
-    route.managed_package_id = str(graph.get("package_id") or route.managed_package_id or "") or None
-    route.managed_package_version = str(
-        graph.get("package_version") or route.managed_package_version or ""
-    ) or None
+    route.managed_package_id = (
+        str(graph.get("package_id") or route.managed_package_id or "") or None
+    )
+    route.managed_package_version = (
+        str(graph.get("package_version") or route.managed_package_version or "") or None
+    )
     route.content_status = "draft"
     route.published_at = None
 
@@ -2654,7 +3608,9 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
     old_fragment_ids: list[str] = []
     if old_arc:
         old_fragment_ids = list(
-            db.scalars(select(StoryFragment.id).where(StoryFragment.arc_id == old_arc.id))
+            db.scalars(
+                select(StoryFragment.id).where(StoryFragment.arc_id == old_arc.id)
+            )
         )
     incoming_fragments = {
         str(item.get("id") or ""): item for item in graph.get("fragments") or []
@@ -2706,18 +3662,26 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
                 FragmentNarrationTrack.fragment_id.in_(old_fragment_ids)
             )
         )
-        db.execute(delete(FragmentClaim).where(FragmentClaim.fragment_id.in_(old_fragment_ids)))
+        db.execute(
+            delete(FragmentClaim).where(FragmentClaim.fragment_id.in_(old_fragment_ids))
+        )
         db.execute(
             delete(FragmentDependency).where(
                 FragmentDependency.fragment_id.in_(old_fragment_ids)
             )
         )
-        db.execute(delete(TriggerRegion).where(TriggerRegion.fragment_id.in_(old_fragment_ids)))
-        db.execute(delete(PhotoMission).where(PhotoMission.fragment_id.in_(old_fragment_ids)))
+        db.execute(
+            delete(TriggerRegion).where(TriggerRegion.fragment_id.in_(old_fragment_ids))
+        )
+        db.execute(
+            delete(PhotoMission).where(PhotoMission.fragment_id.in_(old_fragment_ids))
+        )
         db.execute(delete(StoryFragment).where(StoryFragment.id.in_(old_fragment_ids)))
     if old_arc:
         db.execute(
-            delete(HomeStoryPublication).where(HomeStoryPublication.arc_id == old_arc.id)
+            delete(HomeStoryPublication).where(
+                HomeStoryPublication.arc_id == old_arc.id
+            )
         )
         db.execute(
             delete(StoryNarrationTrack).where(StoryNarrationTrack.arc_id == old_arc.id)
@@ -2732,7 +3696,9 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
     for raw in graph.get("sources") or []:
         values = dict(raw)
         identity = str(values.pop("id"))
-        values["accessed_at"] = _parse_datetime(values.get("accessed_at")) or datetime.now(UTC)
+        values["accessed_at"] = _parse_datetime(
+            values.get("accessed_at")
+        ) or datetime.now(UTC)
         item = db.get(HistoricalSource, identity)
         if item is None:
             db.add(HistoricalSource(id=identity, **values))
@@ -2757,7 +3723,9 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
                 ClaimSource(
                     claim_id=identity,
                     source_id=source_id,
-                    support_note=str(support_notes.get(source_id) or "支持该线索中的事实表述"),
+                    support_note=str(
+                        support_notes.get(source_id) or "支持该线索中的事实表述"
+                    ),
                 )
             )
 
@@ -2792,7 +3760,9 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
             route_id=route.id,
             position=int(values["position"]),
             title=str(stop_data.get("title") or values.get("title") or ""),
-            kicker=str(stop_data.get("kicker") or values.get("safe_preview") or "现场线索"),
+            kicker=str(
+                stop_data.get("kicker") or values.get("safe_preview") or "现场线索"
+            ),
             address=str(stop_data.get("address") or "公共步行区域"),
             latitude=float(stop_data.get("latitude", region_data.get("latitude"))),
             longitude=float(stop_data.get("longitude", region_data.get("longitude"))),
@@ -2800,7 +3770,9 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
                 stop_data.get("arrival_radius_m", region_data.get("entry_radius_m", 60))
             ),
             story_title=str(stop_data.get("story_title") or values.get("title") or ""),
-            story_body=str(stop_data.get("story_body") or values.get("transcript") or ""),
+            story_body=str(
+                stop_data.get("story_body") or values.get("transcript") or ""
+            ),
             audio_url=stop_data.get("audio_url") or values.get("audio_path"),
             image=str(stop_data.get("image") or route.hero_image),
             insight=str(stop_data.get("insight") or values.get("key_claim") or ""),
@@ -2927,7 +3899,9 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
             HomeStoryPublication(
                 id=str(home_story_data.get("id") or uuid4()),
                 arc_id=arc.id,
-                selected_track_id=(str(selected_track_id) if selected_track_id else None),
+                selected_track_id=(
+                    str(selected_track_id) if selected_track_id else None
+                ),
                 title=str(home_story_data.get("title") or arc.title),
                 introduction=str(
                     home_story_data.get("introduction")
@@ -2995,12 +3969,17 @@ def submit_route_review(route_id: str, _: Auth, db: Db):
     route.content_status = "in_review"
     route.published_at = None
     db.commit()
-    return {"route": route_dict(route), "validation": _publication_validation(db, route)}
+    return {
+        "route": route_dict(route),
+        "validation": _publication_validation(db, route),
+    }
 
 
 @app.post("/api/admin/routes/{route_id}/verify")
 def verify_route_content(route_id: str, _: Auth, db: Db):
-    route = _route_for_transition(db, route_id, {"in_review"}, "只有待审核路线可以通过审核")
+    route = _route_for_transition(
+        db, route_id, {"in_review"}, "只有待审核路线可以通过审核"
+    )
     result = _publication_validation(db, route)
     if not result["valid"]:
         raise HTTPException(422, detail={"code": "content_validation_failed", **result})
@@ -3055,17 +4034,57 @@ def _publication_validation(db: Session, route: Route) -> dict[str, Any]:
     graph = _route_content(db, route)
     if graph["story_arc"] is not None:
         result = validate_graph(graph, _media_catalog(db))
-        fragments = list(db.scalars(select(StoryFragment).where(StoryFragment.arc_id == graph["story_arc"]["id"])))
+        fragments = list(
+            db.scalars(
+                select(StoryFragment).where(
+                    StoryFragment.arc_id == graph["story_arc"]["id"]
+                )
+            )
+        )
         for index, fragment in enumerate(fragments):
-            has_candidates = db.scalar(select(func.count()).select_from(NarrationPreview).where(NarrationPreview.fragment_id == fragment.id, NarrationPreview.status.in_(["ready", "approved"]))) or 0
+            has_candidates = (
+                db.scalar(
+                    select(func.count())
+                    .select_from(NarrationPreview)
+                    .where(
+                        NarrationPreview.fragment_id == fragment.id,
+                        NarrationPreview.status.in_(["ready", "approved"]),
+                    )
+                )
+                or 0
+            )
             if not has_candidates:
                 continue
-            transcript_hash = hashlib.sha256(fragment.narration_script.strip().encode()).hexdigest()
-            approved = db.scalar(select(NarrationPreview).where(NarrationPreview.fragment_id == fragment.id, NarrationPreview.status == "approved", NarrationPreview.transcript_hash == transcript_hash))
-            asset = db.scalar(select(MediaAsset).where(MediaAsset.storage_path == fragment.audio_path))
-            provenance = (asset.metadata_json.get("narration") if asset and isinstance(asset.metadata_json, dict) else None) or {}
-            if approved is None or provenance.get("preview_id") != approved.id or provenance.get("transcript_hash") != transcript_hash:
-                result["errors"].append({"path": f"fragments[{index}].audio_path", "code": "narration_not_approved", "message": "当前文字稿已有试听版本，发布前必须批准与文字稿一致的旁白"})
+            transcript_hash = hashlib.sha256(
+                fragment.narration_script.strip().encode()
+            ).hexdigest()
+            approved = db.scalar(
+                select(NarrationPreview).where(
+                    NarrationPreview.fragment_id == fragment.id,
+                    NarrationPreview.status == "approved",
+                    NarrationPreview.transcript_hash == transcript_hash,
+                )
+            )
+            asset = db.scalar(
+                select(MediaAsset).where(MediaAsset.storage_path == fragment.audio_path)
+            )
+            provenance = (
+                asset.metadata_json.get("narration")
+                if asset and isinstance(asset.metadata_json, dict)
+                else None
+            ) or {}
+            if (
+                approved is None
+                or provenance.get("preview_id") != approved.id
+                or provenance.get("transcript_hash") != transcript_hash
+            ):
+                result["errors"].append(
+                    {
+                        "path": f"fragments[{index}].audio_path",
+                        "code": "narration_not_approved",
+                        "message": "当前文字稿已有试听版本，发布前必须批准与文字稿一致的旁白",
+                    }
+                )
         result["valid"] = not result["errors"]
         return result
     errors: list[dict[str, str]] = []
@@ -3073,10 +4092,16 @@ def _publication_validation(db: Session, route: Route) -> dict[str, Any]:
     stops = list(db.scalars(select(Stop).where(Stop.route_id == route.id)))
     if not stops:
         errors.append(
-            {"path": "stops", "code": "stops_missing", "message": "路线至少需要一个站点"}
+            {
+                "path": "stops",
+                "code": "stops_missing",
+                "message": "路线至少需要一个站点",
+            }
         )
     media = _media_catalog(db)
-    if route.hero_image not in media and not route.hero_image.startswith(("http://", "https://")):
+    if route.hero_image not in media and not route.hero_image.startswith(
+        ("http://", "https://")
+    ):
         errors.append(
             {
                 "path": "route.hero_image",
@@ -3110,8 +4135,14 @@ def import_fragmented_route(payload: dict[str, Any], _: Auth, db: Db):
         storage_path = str(media_data.get("storage_path") or "").strip()
         mime_type = str(media_data.get("mime_type") or "").strip()
         checksum = str(media_data.get("sha256") or "").strip().lower()
-        if not asset_key or not storage_path or not mime_type.startswith(("image/", "audio/")):
-            raise HTTPException(422, "media 中的 key、storage_path 和图片/音频 MIME 必填")
+        if (
+            not asset_key
+            or not storage_path
+            or not mime_type.startswith(("image/", "audio/"))
+        ):
+            raise HTTPException(
+                422, "media 中的 key、storage_path 和图片/音频 MIME 必填"
+            )
         item = db.get(MediaAsset, asset_key)
         if item is None:
             item = db.scalar(
@@ -3130,9 +4161,24 @@ def import_fragmented_route(payload: dict[str, Any], _: Auth, db: Db):
             if public_object_storage.provider != "local":
                 raise HTTPException(422, f"请先在媒体库上传并登记资源：{asset_key}")
             candidate = (media_root / storage_path).resolve()
-            if (media_root != candidate and media_root not in candidate.parents) or not candidate.is_file():
+            if (
+                media_root != candidate and media_root not in candidate.parents
+            ) or not candidate.is_file():
                 raise HTTPException(422, f"媒体文件不存在：{storage_path}")
-            db.add(MediaAsset(key=asset_key, storage_path=storage_path, mime_type=mime_type, storage_provider="local", object_key=storage_path, visibility="public", size_bytes=candidate.stat().st_size, metadata_json={}, created_at=now, updated_at=now))
+            db.add(
+                MediaAsset(
+                    key=asset_key,
+                    storage_path=storage_path,
+                    mime_type=mime_type,
+                    storage_provider="local",
+                    object_key=storage_path,
+                    visibility="public",
+                    size_bytes=candidate.stat().st_size,
+                    metadata_json={},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
         else:
             if checksum and item.checksum_sha256 and item.checksum_sha256 != checksum:
                 raise HTTPException(409, f"媒体校验和与已登记资源不匹配：{asset_key}")
@@ -3147,7 +4193,9 @@ def import_fragmented_route(payload: dict[str, Any], _: Auth, db: Db):
         return {
             "idempotent": True,
             "route": route_dict(existing),
-            "validation": validate_graph(_route_content(db, existing), _media_catalog(db)),
+            "validation": validate_graph(
+                _route_content(db, existing), _media_catalog(db)
+            ),
         }
     if existing and _published_route_locked(db, existing):
         raise HTTPException(409, "published_route_locked")
@@ -3213,7 +4261,6 @@ def _replace_media_aliases(value: Any, aliases: dict[str, str]) -> Any:
         return [_replace_media_aliases(item, aliases) for item in value]
     if isinstance(value, dict):
         return {
-            key: _replace_media_aliases(item, aliases)
-            for key, item in value.items()
+            key: _replace_media_aliases(item, aliases) for key, item in value.items()
         }
     return value

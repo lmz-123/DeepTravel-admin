@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "package_id": "city-story-example",
+  "package_version": "1",
+  "entities": {
+    "cities": [
+      {
+        "id": "city-example",
+        "slug": "example-city",
+        "name": "示例城市",
+        "subtitle": "等待编辑审核的城市知识",
+        "hero_image": "images/example-city.jpg",
+        "latitude": 22.5431,
+        "longitude": 114.0579
+      }
+    ],
+    "routes": [],
+    "stops": [],
+    "story_arcs": [],
+    "story_fragments": [],
+    "catalog_items": [],
+    "variants": [],
+    "placements": [],
+    "pretrip_guidance": [],
+    "media": []
+  }
+}
