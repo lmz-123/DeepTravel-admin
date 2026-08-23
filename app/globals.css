@@ -69,6 +69,7 @@ h2 { font-size: 21px; }
 .route-name small, .muted { color: var(--muted); font-size: 11px; }
 .tag { font-style: normal; color: #80642f; background: #f2e8d4; border-radius: 20px; padding: 5px 9px; font-size: 10px; }
 .tag.published { color: #2f6c51; background: #e0ede6; }
+.tag-preview { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
 
 .quick-panel { padding-bottom: 14px; }
 .quick-action { width: 100%; display: grid; grid-template-columns: 36px 1fr 20px; gap: 11px; align-items: center; border: 0; border-top: 1px solid #e8e4da; background: transparent; padding: 15px 4px; text-align: left; cursor: pointer; }

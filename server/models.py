@@ -102,6 +102,7 @@ class Stop(Base):
     audio_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     image: Mapped[str] = mapped_column(String(255))
     insight: Mapped[str] = mapped_column(Text)
+    experience_tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
 class Challenge(Base):
@@ -215,6 +216,7 @@ class StoryFragment(Base):
     raises_question: Mapped[str] = mapped_column(Text)
     authenticity_label: Mapped[str] = mapped_column(String(80), default="interpretive")
     review_state: Mapped[str] = mapped_column(String(40), default="in_review")
+    experience_tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
 class NarrationVoiceProfile(Base):

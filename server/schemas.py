@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from content_schema import normalize_experience_tags
+
 
 class CityInput(BaseModel):
     slug: str = Field(min_length=1, max_length=80)
@@ -46,6 +48,12 @@ class StopInput(BaseModel):
     audio_url: str | None = Field(default=None, max_length=500)
     image: str = Field(min_length=1, max_length=255)
     insight: str = Field(min_length=1)
+    experience_tags: list[str] = Field(default_factory=list)
+
+    @field_validator("experience_tags", mode="before")
+    @classmethod
+    def validate_experience_tags(cls, value: object) -> list[str]:
+        return normalize_experience_tags(value)
 
 
 class ChallengeInput(BaseModel):

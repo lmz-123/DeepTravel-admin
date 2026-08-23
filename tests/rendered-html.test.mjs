@@ -32,7 +32,7 @@ test("server-renders the DeepTravel admin application", async () => {
   assert.match(html, /<title>简地内容中台<\/title>/i);
   assert.match(html, /碎片导览/);
   assert.match(html, /运行日志/);
-  assert.match(html, /<span>09<\/span>运行日志/);
+  assert.match(html, /<span>10<\/span>运行日志/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Building your site/i);
 });
 
@@ -47,7 +47,7 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.match(page, /<AdminApp \/>/);
   assert.match(layout, /简地内容中台/);
   assert.match(admin, /"fragmented", "04", "碎片导览"/);
-  assert.match(admin, /"logs", "09", "运行日志"/);
+  assert.match(admin, /"logs", "10", "运行日志"/);
   assert.match(admin, /\/fragmented-routes\/import/);
   assert.match(admin, /\/routes\/\$\{routeId\}\/validate/);
   assert.match(admin, /submit-review/);
@@ -79,6 +79,13 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.match(admin, /设为默认/);
   assert.match(admin, /最终因果链/);
   assert.match(admin, /史实来源与主张/);
+  assert.match(admin, /体验标签/);
+  assert.match(admin, /规范化标签预览/);
+  assert.match(admin, /experience_tags/);
+  assert.match(admin, /aria-invalid/);
+  assert.match(admin, /体验标签最多填写 8 个/);
+  assert.match(admin, /每个体验标签最多 24 个字/);
+  assert.doesNotMatch(admin, /recognition_radius_m|discovery_order/);
   assert.match(logConsole, /Authorization.*Bearer/);
   assert.match(logConsole, /text\/event-stream/);
   assert.match(logConsole, /客户端运行日志/);

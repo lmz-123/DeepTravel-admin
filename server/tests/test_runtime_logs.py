@@ -276,7 +276,7 @@ class FragmentedContentApiTests(unittest.TestCase):
 
     def fragment(self, identity, position, audio, claim, latitude, longitude, dependencies, mission):
         script = f"第 {position} 段经过审核的旁白。"
-        value = {"id": identity, "position": position, "title": f"线索 {position}", "safe_preview": "请继续前行", "narration_script": script, "transcript": script, "audio_path": audio, "audio_mime_type": "audio/mp4", "audio_size_bytes": 9, "script_version": "test-v1", "interaction_type": "photo" if mission else "passive", "completion_threshold": 0.9, "key_claim": "经过来源支持的主张", "answers_question": "回答前一问", "raises_question": "提出下一问", "authenticity_label": "documented", "review_state": "reviewed", "dependency_ids": dependencies, "claim_ids": [claim], "trigger_region": {"id": f"trigger-{position}", "latitude": latitude, "longitude": longitude, "entry_radius_m": 50, "exit_radius_m": 85, "max_accuracy_m": 35, "qualifying_samples": 2, "sample_window_seconds": 15, "cooldown_seconds": 120, "audit_state": "reviewed", "coordinate_system": "WGS84", "source_coordinate_system": "WGS84", "coordinate_source": "现场 GPS 复核", "field_notes": "公共步行区域"}}
+        value = {"id": identity, "position": position, "title": f"线索 {position}", "safe_preview": "请继续前行", "experience_tags": [" 安静 ", "安静", f"未来标签 {position}"], "narration_script": script, "transcript": script, "audio_path": audio, "audio_mime_type": "audio/mp4", "audio_size_bytes": 9, "script_version": "test-v1", "interaction_type": "photo" if mission else "passive", "completion_threshold": 0.9, "key_claim": "经过来源支持的主张", "answers_question": "回答前一问", "raises_question": "提出下一问", "authenticity_label": "documented", "review_state": "reviewed", "dependency_ids": dependencies, "claim_ids": [claim], "trigger_region": {"id": f"trigger-{position}", "latitude": latitude, "longitude": longitude, "entry_radius_m": 50, "exit_radius_m": 85, "max_accuracy_m": 35, "qualifying_samples": 2, "sample_window_seconds": 15, "cooldown_seconds": 120, "audit_state": "reviewed", "coordinate_system": "WGS84", "source_coordinate_system": "WGS84", "coordinate_source": "现场 GPS 复核", "field_notes": "公共步行区域"}}
         if mission:
             value["photo_mission"] = {"id": "mission-one", "prompt": "拍摄现场标志", "field_subject": "公共标志", "vantage_point": "站在公共步道内侧的导览牌旁", "shooting_direction": "朝向现场标志正面", "composition_tip": "保留标志与周边环境，主体置于画面中央", "safety_copy": "请勿进入车道", "accessibility_alternative": "可拍摄邻近导览牌", "authenticity_label": "documented", "required": False, "audit_state": "reviewed"}
         return value
@@ -298,6 +298,10 @@ class FragmentedContentApiTests(unittest.TestCase):
         imported_graph = self.client.get(
             "/api/admin/routes/route-test/content", headers=self.headers
         ).json()
+        self.assertEqual(
+            imported_graph["fragments"][0]["experience_tags"],
+            ["安静", "未来标签 1"],
+        )
         now = datetime.now(UTC)
         script = imported_graph["fragments"][0]["narration_script"]
         with main.SessionLocal() as db:
@@ -353,6 +357,10 @@ class FragmentedContentApiTests(unittest.TestCase):
             [item["id"] for item in saved.json()["content"]["fragments"]],
             ["fragment-one", "fragment-two"],
         )
+        self.assertEqual(
+            saved.json()["content"]["fragments"][0]["experience_tags"],
+            ["安静", "未来标签 1"],
+        )
         saved_mission = saved.json()["content"]["fragments"][0]["photo_mission"]
         self.assertEqual(saved_mission["vantage_point"], "站在公共步道内侧的导览牌旁")
         self.assertEqual(saved_mission["shooting_direction"], "朝向现场标志正面")
@@ -391,9 +399,79 @@ class FragmentedContentApiTests(unittest.TestCase):
             db.add(Journey(id="journey-test", route_id="route-test", status="active"))
             db.commit()
         graph = self.client.get("/api/admin/routes/route-test/content", headers=self.headers).json()
-        graph["story_arc"]["complete_story"] = "试图覆盖已使用版本"
+        graph["fragments"][0]["experience_tags"] = ["试图绕过发布锁"]
         locked = self.client.put("/api/admin/routes/route-test/content", headers=self.headers, json=graph)
         self.assertEqual(locked.status_code, 409, locked.text)
+
+    def test_legacy_stop_tags_normalize_and_invalid_update_does_not_mutate(self):
+        city = self.client.post(
+            "/api/admin/cities",
+            headers=self.headers,
+            json={
+                "slug": "tag-city",
+                "name": "标签城",
+                "subtitle": "测试",
+                "hero_image": "images/route.png",
+                "latitude": 22.5,
+                "longitude": 114.0,
+            },
+        )
+        self.assertEqual(city.status_code, 201, city.text)
+        route = self.client.post(
+            "/api/admin/routes",
+            headers=self.headers,
+            json={
+                "city_id": city.json()["id"],
+                "slug": "tag-route",
+                "title": "标签路线",
+                "subtitle": "测试",
+                "description": "测试",
+                "duration_minutes": 30,
+                "distance_km": 1,
+                "difficulty": "轻松",
+                "theme": "历史",
+                "hero_image": "images/route.png",
+                "is_featured": False,
+            },
+        )
+        self.assertEqual(route.status_code, 201, route.text)
+        payload = {
+            "route_id": route.json()["id"],
+            "position": 1,
+            "title": "老城门",
+            "kicker": "抬头看",
+            "address": "旧城",
+            "latitude": 22.5,
+            "longitude": 114.0,
+            "arrival_radius_m": 80,
+            "story_title": "城门故事",
+            "story_body": "故事",
+            "audio_url": None,
+            "image": "images/route.png",
+            "insight": "观察",
+            "experience_tags": [" 老建筑 ", "老建筑", "未来新标签"],
+        }
+        created = self.client.post(
+            "/api/admin/stops", headers=self.headers, json=payload
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(
+            created.json()["experience_tags"], ["老建筑", "未来新标签"]
+        )
+
+        invalid = dict(payload)
+        invalid["experience_tags"] = [f"标签-{index}" for index in range(9)]
+        rejected = self.client.put(
+            f"/api/admin/stops/{created.json()['id']}",
+            headers=self.headers,
+            json=invalid,
+        )
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+        rows = self.client.get(
+            f"/api/admin/stops?route_id={route.json()['id']}",
+            headers=self.headers,
+        ).json()
+        self.assertEqual(rows[0]["experience_tags"], ["老建筑", "未来新标签"])
 
     def test_publish_rejects_missing_media(self):
         payload = self.payload()

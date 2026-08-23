@@ -23,7 +23,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from content_graph import validate_graph
-from content_schema import ensure_photo_mission_guidance_schema
+from content_schema import ensure_photo_mission_guidance_schema, normalize_experience_tags
 from models import (
     Challenge,
     City,
@@ -292,8 +292,15 @@ def stop_dict(item: Stop, route_title: str | None = None, has_challenge: bool = 
         "audio_url": item.audio_url,
         "image": item.image,
         "insight": item.insight,
+        "experience_tags": normalize_experience_tags(item.experience_tags_json or []),
         "has_challenge": has_challenge,
     }
+
+
+def stop_values(payload: StopInput) -> dict[str, Any]:
+    values = payload.model_dump()
+    values["experience_tags_json"] = values.pop("experience_tags")
+    return values
 
 
 def challenge_dict(item: Challenge, stop_title: str | None = None, route_title: str | None = None) -> dict[str, Any]:
@@ -697,7 +704,7 @@ def list_stops(_: Auth, db: Db, route_id: str | None = None, q: str = ""):
 def create_stop(payload: StopInput, _: Auth, db: Db):
     if not db.get(Route, payload.route_id):
         raise HTTPException(400, "所选路线不存在")
-    item = Stop(id=str(uuid4()), **payload.model_dump())
+    item = Stop(id=str(uuid4()), **stop_values(payload))
     db.add(item)
     commit_or_conflict(db, "同一路线中的站点序号不能重复")
     return stop_dict(item)
@@ -708,7 +715,7 @@ def update_stop(item_id: str, payload: StopInput, _: Auth, db: Db):
     item = db.get(Stop, item_id)
     if not item:
         raise HTTPException(404, "站点不存在")
-    for key, value in payload.model_dump().items():
+    for key, value in stop_values(payload).items():
         setattr(item, key, value)
     commit_or_conflict(db, "同一路线中的站点序号不能重复")
     return stop_dict(item)
@@ -2321,7 +2328,7 @@ def import_content(payload: dict[str, Any], _: Auth, db: Db):
             stop_id = supplied_stop_id or db.scalar(
                 select(Stop.id).where(Stop.route_id == data.route_id, Stop.position == data.position)
             ) or str(uuid4())
-            upsert(db, Stop, stop_id, data.model_dump())
+            upsert(db, Stop, stop_id, stop_values(data))
             stop_ids[f"{data.route_id}:{data.position}"] = stop_id
             if nested_challenge:
                 pending_challenges.append({**nested_challenge, "stop_id": stop_id})
@@ -2454,6 +2461,9 @@ def _route_content(db: Session, route: Route) -> dict[str, Any]:
             "audio_url": stop.audio_url,
             "image": stop.image,
             "insight": stop.insight,
+            "experience_tags": normalize_experience_tags(
+                stop.experience_tags_json or []
+            ),
         }
 
     fragment_payloads = []
@@ -2479,6 +2489,9 @@ def _route_content(db: Session, route: Route) -> dict[str, Any]:
                 "raises_question": fragment.raises_question,
                 "authenticity_label": fragment.authenticity_label,
                 "review_state": fragment.review_state,
+                "experience_tags": normalize_experience_tags(
+                    fragment.experience_tags_json or []
+                ),
                 "dependency_ids": dependency_map.get(fragment.id, []),
                 "claim_ids": claim_map.get(fragment.id, []),
                 "stop": stop_payload(stops.get(fragment.stop_id or "")),
@@ -2791,6 +2804,9 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
             audio_url=stop_data.get("audio_url") or values.get("audio_path"),
             image=str(stop_data.get("image") or route.hero_image),
             insight=str(stop_data.get("insight") or values.get("key_claim") or ""),
+            experience_tags_json=normalize_experience_tags(
+                stop_data.get("experience_tags")
+            ),
         )
         db.add(stop)
         db.flush()
@@ -2814,6 +2830,9 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
             raises_question=str(values.get("raises_question") or ""),
             authenticity_label=str(values.get("authenticity_label") or "interpretive"),
             review_state=str(values.get("review_state") or "in_review"),
+            experience_tags_json=normalize_experience_tags(
+                values.get("experience_tags")
+            ),
         )
         db.add(fragment)
         db.flush()

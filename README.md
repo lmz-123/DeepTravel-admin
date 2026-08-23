@@ -15,6 +15,12 @@
 
 ## 服务器部署
 
+景点体验标签由 DeepTravel 主仓库的 Alembic 迁移
+`20260823_0012` 提供（仅新增 `stops.experience_tags_json` 与
+`story_fragments.experience_tags_json`）。部署本管理服务前必须先在
+`/root/DeepTravel` 执行 `docker compose run --rm api alembic upgrade head`。
+管理后台不创建这两个共享列；回滚管理后台代码时保留附加列和已有标签数据。
+
 ```bash
 git clone git@github.com:lmz-123/DeepTravel-admin.git
 cd DeepTravel-admin

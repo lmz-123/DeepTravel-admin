@@ -1,6 +1,14 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FormEvent,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import LogConsole from "./logs/LogConsole.tsx";
 
 type Tab =
@@ -59,6 +67,7 @@ type Stop = {
   audio_url?: string | null;
   image: string;
   insight: string;
+  experience_tags: string[];
   has_challenge: boolean;
 };
 type Challenge = {
@@ -1099,17 +1108,21 @@ function HomeStoriesWorkspace({
   }, [request, setNotice]);
 
   useEffect(() => {
-    void load();
+    const timer = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timer);
   }, [load]);
   useEffect(() => {
-    const publication = selected?.publication;
-    setDraft({
-      title: publication?.title || selected?.arc_title || "",
-      introduction: publication?.introduction || "",
-      cover_image: publication?.cover_image || "",
-      selection_weight: publication?.selection_weight || 1,
-      selected_track_id: publication?.selected_track_id || "",
-    });
+    const timer = window.setTimeout(() => {
+      const publication = selected?.publication;
+      setDraft({
+        title: publication?.title || selected?.arc_title || "",
+        introduction: publication?.introduction || "",
+        cover_image: publication?.cover_image || "",
+        selection_weight: publication?.selection_weight || 1,
+        selected_track_id: publication?.selected_track_id || "",
+      });
+    }, 0);
+    return () => window.clearTimeout(timer);
   }, [selected]);
   useEffect(
     () => () => {
@@ -1882,6 +1895,12 @@ function FragmentedRouteWorkspace({
                           />
                         </Field>
                       </div>
+                      <TagEditor
+                        tags={stringList(fragment.experience_tags)}
+                        onChange={(tags) =>
+                          updateFragment(index, "experience_tags", tags)
+                        }
+                      />
                       <Field label="耳机旁白（保存时须与文字稿完全一致）">
                         <textarea
                           rows={6}
@@ -3003,6 +3022,9 @@ function EditorDialog({
       payload.longitude = Number(payload.longitude);
       payload.arrival_radius_m = Number(payload.arrival_radius_m);
       payload.audio_url = payload.audio_url || null;
+      payload.experience_tags = parseTagText(
+        String(payload.experience_tags || ""),
+      );
     }
     if (editor.kind === "challenge") {
       payload.options = String(payload.options)
@@ -3306,6 +3328,10 @@ function StopFields({
           required
         />
       </Field>
+      <TagEditor
+        name="experience_tags"
+        tags={stringList(item.experience_tags)}
+      />
       <MediaField
         name="image"
         label="故事图片路径"
@@ -3411,6 +3437,73 @@ function Field({
     </label>
   );
 }
+
+function parseTagText(value: string): string[] {
+  return Array.from(
+    new Set(
+      value
+        .split(/[\n,，]/)
+        .map((item) => item.trim())
+        .filter(Boolean),
+    ),
+  );
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string")
+    : [];
+}
+
+function TagEditor({
+  tags,
+  name,
+  onChange,
+}: {
+  tags: string[];
+  name?: string;
+  onChange?: (tags: string[]) => void;
+}) {
+  const [text, setText] = useState(tags.join("，"));
+  const normalized = parseTagText(text);
+  const helpId = useId();
+  const validation =
+    normalized.length > 8
+      ? "体验标签最多填写 8 个"
+      : normalized.find((tag) => tag.length > 24)
+        ? "每个体验标签最多 24 个字"
+        : "";
+  return (
+    <Field label="体验标签">
+      <textarea
+        name={name}
+        rows={2}
+        value={text}
+        placeholder="安静，适合一个人，老建筑"
+        aria-describedby={helpId}
+        aria-invalid={Boolean(validation)}
+        onChange={(event) => {
+          setText(event.target.value);
+          onChange?.(parseTagText(event.target.value));
+        }}
+      />
+      <small id={helpId}>
+        逗号或换行分隔，最多 8 个，每个最多 24 个字；示例仅供参考，可填写新标签。
+      </small>
+      {validation && <small role="alert">{validation}</small>}
+      {normalized.length > 0 && (
+        <span className="tag-preview" aria-label="规范化标签预览">
+          {normalized.map((tag) => (
+            <em className="tag" key={tag}>
+              {tag}
+            </em>
+          ))}
+        </span>
+      )}
+    </Field>
+  );
+}
+
 function MediaField({
   name,
   label,

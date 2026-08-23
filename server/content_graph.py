@@ -3,6 +3,8 @@ from __future__ import annotations
 from math import asin, cos, radians, sin, sqrt
 from typing import Any
 
+from content_schema import normalize_experience_tags
+
 
 def validate_graph(graph: dict[str, Any], media_assets: dict[str, str]) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
@@ -57,6 +59,24 @@ def validate_graph(graph: dict[str, Any], media_assets: dict[str, str]) -> dict[
     previous: dict[str, Any] | None = None
     for index, fragment in enumerate(fragments):
         path = f"fragments[{index}]"
+        try:
+            fragment["experience_tags"] = normalize_experience_tags(
+                fragment.get("experience_tags")
+            )
+        except ValueError as exc:
+            error(f"{path}.experience_tags", "experience_tags_invalid", str(exc))
+        stop = fragment.get("stop")
+        if isinstance(stop, dict):
+            try:
+                stop["experience_tags"] = normalize_experience_tags(
+                    stop.get("experience_tags")
+                )
+            except ValueError as exc:
+                error(
+                    f"{path}.stop.experience_tags",
+                    "experience_tags_invalid",
+                    str(exc),
+                )
         for key in ("title", "narration_script", "transcript", "audio_path", "script_version"):
             if not str(fragment.get(key) or "").strip():
                 error(f"{path}.{key}", "required", "线索缺少必填内容")
