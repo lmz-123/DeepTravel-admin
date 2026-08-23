@@ -33,8 +33,10 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from content_graph import validate_graph
 from content_schema import (
+    ensure_footprint_content_schema,
     ensure_photo_mission_guidance_schema,
     normalize_experience_tags,
+    normalize_footprint_summary_options,
 )
 from models import (
     Challenge,
@@ -240,6 +242,7 @@ async def lifespan(_: FastAPI):
         raise RuntimeError("CLIENT_LOG_INGEST_TOKEN 必须与 ADMIN_TOKEN 不同")
     ensure_client_log_schema(engine)
     ensure_photo_mission_guidance_schema(engine)
+    ensure_footprint_content_schema(engine)
     await asyncio.to_thread(run_log_retention)
     yield
 
@@ -3443,6 +3446,10 @@ def _route_content(db: Session, route: Route) -> dict[str, Any]:
                 "experience_tags": normalize_experience_tags(
                     fragment.experience_tags_json or []
                 ),
+                "footprint_editorial_summary": fragment.footprint_editorial_summary,
+                "footprint_summary_options": normalize_footprint_summary_options(
+                    fragment.footprint_summary_options_json or []
+                ),
                 "dependency_ids": dependency_map.get(fragment.id, []),
                 "claim_ids": claim_map.get(fragment.id, []),
                 "stop": stop_payload(stops.get(fragment.stop_id or "")),
@@ -3804,6 +3811,13 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
             review_state=str(values.get("review_state") or "in_review"),
             experience_tags_json=normalize_experience_tags(
                 values.get("experience_tags")
+            ),
+            footprint_editorial_summary=str(
+                values.get("footprint_editorial_summary") or ""
+            ).strip()
+            or None,
+            footprint_summary_options_json=normalize_footprint_summary_options(
+                values.get("footprint_summary_options")
             ),
         )
         db.add(fragment)

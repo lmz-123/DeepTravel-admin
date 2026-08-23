@@ -1956,6 +1956,37 @@ function FragmentedRouteWorkspace({
                           updateFragment(index, "experience_tags", tags)
                         }
                       />
+                      <Field label="足迹中的见地讲述（审核后的概括）">
+                        <textarea
+                          rows={3}
+                          maxLength={600}
+                          value={str(fragment.footprint_editorial_summary)}
+                          onChange={(event) =>
+                            updateFragment(
+                              index,
+                              "footprint_editorial_summary",
+                              event.target.value,
+                            )
+                          }
+                          placeholder="仅写可长期保留的事实与故事概括，不写音频版本信息"
+                        />
+                      </Field>
+                      <Field label="可选概括（每行：稳定ID | 文字）">
+                        <textarea
+                          rows={4}
+                          value={formatFootprintSummaryOptions(
+                            fragment.footprint_summary_options,
+                          )}
+                          onChange={(event) =>
+                            updateFragment(
+                              index,
+                              "footprint_summary_options",
+                              parseFootprintSummaryOptions(event.target.value),
+                            )
+                          }
+                          placeholder={"noticed-bricks | 我留意到新旧砖缝\ncity-memory | 城市记忆藏在日常细节里"}
+                        />
+                      </Field>
                       <Field label="耳机旁白（保存时须与文字稿完全一致）">
                         <textarea
                           rows={6}
@@ -3842,6 +3873,32 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string")
     : [];
+}
+
+function parseFootprintSummaryOptions(
+  value: string,
+): Array<{ id: string; text: string }> {
+  return value
+    .split("\n")
+    .map((line) => {
+      const separator = line.indexOf("|");
+      return separator < 0
+        ? { id: "", text: line.trim() }
+        : {
+            id: line.slice(0, separator).trim(),
+            text: line.slice(separator + 1).trim(),
+          };
+    })
+    .filter((item) => item.id || item.text);
+}
+
+function formatFootprintSummaryOptions(value: unknown): string {
+  return Array.isArray(value)
+    ? value
+        .filter((item): item is Data => Boolean(item) && typeof item === "object")
+        .map((item) => `${str(item.id)} | ${str(item.text)}`)
+        .join("\n")
+    : "";
 }
 
 function TagEditor({

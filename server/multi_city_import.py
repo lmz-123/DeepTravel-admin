@@ -11,6 +11,7 @@ from uuid import uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from content_schema import normalize_footprint_summary_options
 from models import (
     City,
     ContentImportBatch,
@@ -571,6 +572,10 @@ def _values(collection: str, raw: dict[str, Any]) -> dict[str, Any]:
         validated = StopInput.model_validate(values).model_dump()
         validated["experience_tags_json"] = validated.pop("experience_tags")
         return {"id": identity, **validated}
+    if collection == "story_fragments":
+        values["footprint_summary_options"] = normalize_footprint_summary_options(
+            values.get("footprint_summary_options")
+        )
 
     aliases = {
         "catalog_items": {
@@ -592,7 +597,10 @@ def _values(collection: str, raw: dict[str, Any]) -> dict[str, Any]:
             "causal_model": "causal_model_json",
             "pronunciation_notes": "pronunciation_notes_json",
         },
-        "story_fragments": {"experience_tags": "experience_tags_json"},
+        "story_fragments": {
+            "experience_tags": "experience_tags_json",
+            "footprint_summary_options": "footprint_summary_options_json",
+        },
     }
     for source, target in aliases.get(collection, {}).items():
         if source in values:
@@ -718,6 +726,10 @@ def _values_preview(table_name: str, record: dict[str, Any]) -> dict[str, Any]:
         "catalog_items": {"themes": "themes_json", "point_ids": "point_ids_json"},
         "pretrip_guidance": {"companion_tags": "companion_tags_json"},
         "stops": {"experience_tags": "experience_tags_json"},
+        "story_fragments": {
+            "experience_tags": "experience_tags_json",
+            "footprint_summary_options": "footprint_summary_options_json",
+        },
     }
     for source, target in aliases.get(collection, {}).items():
         if source in values:

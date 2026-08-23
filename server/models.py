@@ -247,6 +247,10 @@ class StoryFragment(Base):
     authenticity_label: Mapped[str] = mapped_column(String(80), default="interpretive")
     review_state: Mapped[str] = mapped_column(String(40), default="in_review")
     experience_tags_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    footprint_editorial_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    footprint_summary_options_json: Mapped[list[dict] | None] = mapped_column(
+        JSON, default=list, nullable=True
+    )
 
 
 class NarrationVoiceProfile(Base):

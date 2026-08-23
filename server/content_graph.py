@@ -3,7 +3,11 @@ from __future__ import annotations
 from math import asin, cos, radians, sin, sqrt
 from typing import Any
 
-from content_schema import normalize_experience_tags
+from content_schema import (
+    MAX_FOOTPRINT_EDITORIAL_SUMMARY_LENGTH,
+    normalize_experience_tags,
+    normalize_footprint_summary_options,
+)
 
 
 def validate_graph(graph: dict[str, Any], media_assets: dict[str, str]) -> dict[str, Any]:
@@ -65,6 +69,43 @@ def validate_graph(graph: dict[str, Any], media_assets: dict[str, str]) -> dict[
             )
         except ValueError as exc:
             error(f"{path}.experience_tags", "experience_tags_invalid", str(exc))
+        editorial_summary = str(
+            fragment.get("footprint_editorial_summary") or ""
+        ).strip()
+        fragment["footprint_editorial_summary"] = editorial_summary
+        if len(editorial_summary) > MAX_FOOTPRINT_EDITORIAL_SUMMARY_LENGTH:
+            error(
+                f"{path}.footprint_editorial_summary",
+                "footprint_editorial_summary_too_long",
+                f"足迹审核概括最多 {MAX_FOOTPRINT_EDITORIAL_SUMMARY_LENGTH} 个字符",
+            )
+        try:
+            fragment["footprint_summary_options"] = normalize_footprint_summary_options(
+                fragment.get("footprint_summary_options")
+            )
+        except ValueError as exc:
+            error(
+                f"{path}.footprint_summary_options",
+                "footprint_summary_options_invalid",
+                str(exc),
+            )
+        is_publishable = route.get("content_status") == "published" or arc.get(
+            "publication_decision"
+        ) in {"publish", "published"}
+        if not editorial_summary:
+            issue = error if is_publishable else warning
+            issue(
+                f"{path}.footprint_editorial_summary",
+                "footprint_editorial_summary_missing",
+                "缺少足迹页使用的审核概括；旧内容运行时会回退到史实主张",
+            )
+        if not fragment.get("footprint_summary_options"):
+            issue = error if is_publishable else warning
+            issue(
+                f"{path}.footprint_summary_options",
+                "footprint_summary_options_missing",
+                "至少配置一个带稳定 id 的概括选项",
+            )
         stop = fragment.get("stop")
         if isinstance(stop, dict):
             try:
