@@ -1,7 +1,7 @@
 ## 1. Main-schema compatibility and admin contracts
 
 - [ ] 1.1 Add schema-compatibility checks for the main repository's pre-departure script/tracks, unified story mapping, media metadata, and required indexes; return actionable 503 details and create no DDL in the admin service.
-- [ ] 1.2 Capture regression fixtures for current route graph, stop editor, tags, narration, home stories, catalog/pretrip, media upload/list/delete, lifecycle locks, and local/fake-OSS providers before changing surfaces.
+- [ ] 1.2 Capture regression fixtures for current route graph, stop editor, tags, narration, home stories, catalog/pretrip, media upload/list/delete, lifecycle locks, and the legacy local/OSS branch before replacing it with mandatory OSS plus in-memory test fakes.
 - [ ] 1.3 Define authorized scenic summary/detail contracts with city/title/cover/status/content counts and consistent user-facing “景点” labels while retaining route IDs internally; add serializer/filter/pagination tests.
 
 ## 2. Scenic context and pre-departure admin APIs
@@ -28,15 +28,16 @@
 
 ## 5. Hierarchical and truthful media library
 
-- [ ] 5.1 Add authorized paginated media hierarchy endpoints returning city/scenic summaries, one asset with typed usages, shared/unassigned classification, provider/object key/safe path, MIME, size/checksum, canonical URL, and reference counts; add mixed-reference and delete-protection tests.
-- [ ] 5.2 Add a sanitized provider/readiness endpoint that reports explicit environment, main/admin provider agreement, safe public base, published-local blockers, counts, and audit time without credentials, raw environment values, private references, or filesystem roots; add redaction tests.
-- [ ] 5.3 Replace the flat media grid with city → scenic expandable browsing, usage filters, shared/unassigned groups, provider badges, metadata, preview/copy/deep-link actions, and accessible loading/empty/error states; add responsive and keyboard tests.
-- [ ] 5.4 Make upload and narration copy name the active provider, show a blocking production warning for local/mismatched/unknown readiness, and provide migration/recheck guidance without running shell commands in the browser; test local, OSS, mismatch, and audit-failure states.
+- [ ] 5.1 Add authorized paginated media hierarchy endpoints returning city/scenic summaries and public/private editorial, narration, pre-departure, community, user-photo, footprint, evidence, and preview usages with shared/unassigned classification, OSS object key, MIME, size/checksum, safe delivery mode, and reference counts; add privacy, mixed-reference, and delete-protection tests.
+- [ ] 5.2 Remove local provider selection/mount assumptions from admin runtime configuration and require production/test API and CMS to use identical public/private OSS buckets, canonical object keys, media references, CDN base, and private-access behavior; fail schema/readiness without complete OSS configuration and retain only in-memory fakes for unit tests.
+- [ ] 5.3 Add a sanitized OSS/shared-resource readiness endpoint reporting explicit environment, safe public/private bucket identity, CDN base, public/private counts, production/test public/private key-checksum/reference/access agreement, disposable-test-prefix status, local-reference/read/mount blockers, and audit time without credentials, permanent private URLs, raw environment values, or filesystem roots; add redaction and permission tests.
+- [ ] 5.4 Replace the flat media grid with city → scenic expandable browsing, usage filters, shared/unassigned groups, public/private OSS badges, metadata, CDN/protected-access preview/copy/deep-link actions, and accessible loading/empty/error states; add responsive, authorization, and keyboard tests.
+- [ ] 5.5 Make upload and narration copy identify public/private OSS scope, show a blocking warning for missing OSS, canonical drift, unsafe test permissions, local references/reads/mounts, CDN bypass, private exposure, or unknown readiness, and provide migration/recheck guidance without running shell commands in the browser.
 
 ## 6. Validation, rollout, and independent delivery
 
 - [ ] 6.1 Run admin Python tests/Ruff, frontend lint/type/build and interaction/e2e suites, then run `openspec validate unify-scenic-content-and-pretrip-experience --strict`; resolve every failure.
-- [ ] 6.2 Test against a disposable MySQL upgraded by the main repository and exercise scenic switching/dirty guards, both content models, pre-departure narration/lifecycle, tag round-trips, unified story migration, local/fake-OSS media hierarchy, and provider mismatch.
+- [ ] 6.2 Test against a disposable MySQL upgraded by the main repository and exercise scenic switching/dirty guards, both content models, pre-departure narration/lifecycle, tag round-trips, unified story migration, in-memory fake OSS media hierarchy, mandatory-configuration failures, shared canonical agreement, and public/private authorization boundaries.
 - [ ] 6.3 Deploy the main repository migration/API first, run admin schema health, then deploy admin; keep old endpoints/components available for rollback until mapping, client compatibility, and production OSS audits pass.
-- [ ] 6.4 Verify production through authorized admin/API checks without exposing secrets: both providers agree on OSS, published samples are OSS/CDN URLs, media counts/references reconcile, and no missing/checksum blocker remains.
+- [ ] 6.4 Verify production and test through authorized admin/API checks without exposing secrets: both use identical public/private buckets, canonical keys, references, CDN and private-access behavior; public samples return the same CDN URLs, private samples resolve the same OSS objects through the same authorization rules, disposable tests cannot overwrite/delete canonical keys, counts/checksums reconcile, and no local reference/read/mount or migration blocker remains.
 - [ ] 6.5 Inspect the independent worktree, commit and push only reviewed admin/OpenSpec changes to its own `main`, and report the admin commit hash, validation results, compatibility version, and exact idempotent deployment/health commands.

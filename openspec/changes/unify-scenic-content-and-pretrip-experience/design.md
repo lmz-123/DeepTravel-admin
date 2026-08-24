@@ -1,6 +1,6 @@
 ## Context
 
-See `proposal.md` for motivation. `Travel-Admin` is an independent React/FastAPI service mapping the main repository's MySQL schema without owning Alembic. The current app has separate navigation and large workspace components for legacy stops, fragmented content, home stories, catalog/pre-trip, and a flat media grid. Route selection in fragmented content is a native `<select>`. Media uploads already go through a provider-neutral local/OSS port, but the UI text always says “服务器媒体目录” and does not show `storage_provider`.
+See `proposal.md` for motivation. `Travel-Admin` is an independent React/FastAPI service mapping the main repository's MySQL schema without owning Alembic. The current app has separate navigation and large workspace components for legacy stops, fragmented content, home stories, catalog/pre-trip, and a flat media grid. Route selection in fragmented content is a native `<select>`. Media uploads currently go through a provider-neutral local/OSS port, but the confirmed target removes local runtime persistence: production and test use an identical public/private canonical OSS resource set, with public CDN and private authorized delivery.
 
 The main repository's same-named change owns any additive schema, public projections, compatibility migration, global audio behavior, and production media migration. This companion design focuses on authorized administration behavior.
 
@@ -11,12 +11,14 @@ The main repository's same-named change owns any additive schema, public project
 - Make selected scenic area the single explicit UI context without conflating legacy and managed persistence models.
 - Replace raw-ID/JSON-first normal flows with searchable structured controls while retaining advanced escape hatches.
 - Expose enough media lineage and provider health for operators to answer where a resource is stored and used.
+- Make OSS-only, complete production/test public/private canonical-resource identity, and delivery boundaries visible and blocking when invalid.
 
 **Non-Goals:**
 
 - Rebuild the CMS framework, move the admin into the Flask process, or create DDL from FastAPI startup.
 - Store full graph drafts only in browser state or bypass current authorization/lifecycle locks.
 - Delete legacy endpoints or resources during the first rollout.
+- Expose private object URLs/credentials or let automated tests overwrite/delete canonical keys shared by production and test.
 
 ## Decisions
 
@@ -50,28 +52,29 @@ Alternative considered: visually embed both old components in one page. Rejected
 
 The admin API returns paginated city/scenic summary counts and asset details with typed usages from the main schema. The browser does not download all content graphs and infer ownership. Assets remain unique rows; the UI presents multiple usage links for shared assets and a separate unassigned group. Delete checks continue server-side against every reference and publication state.
 
-Provider readiness comes from a sanitized health/audit endpoint containing provider names, safe canonical base, counts, local-published blockers, audit timestamp, and status. It never returns bucket secrets, access keys, filesystem roots, or raw environment values. The upload panel uses this response for truthful copy.
+OSS readiness comes from a sanitized health/audit endpoint containing required-configuration status, authorized safe public/private bucket identities, CDN base, production/test canonical agreement, scope counts, local-reference/mount blockers, audit timestamp, and status. It never returns bucket secrets, access keys, permanent private URLs, filesystem roots, or raw environment values. The upload panel uses this response to show the public/private target and delivery mode; there is no provider selector.
 
 Alternative considered: group by object-key folder names. Rejected because current keys are checksum/date/narration oriented and do not reliably encode content ownership.
 
-### 6. Treat production media mismatch as an operational blocker
+### 6. Treat any non-OSS or shared-resource mismatch as an operational blocker
 
-The CMS detects production from an explicit non-secret environment label supplied by the server, not the browser hostname. If either main/admin provider differs, public provider is local, or published audit has local URLs, the media page shows a blocking state and disables claims of production readiness. It provides copyable documented migration/recheck steps, but the browser never runs shell migration or receives credentials.
+The CMS reads an explicit non-secret environment label supplied by the server, not the browser hostname. API and admin must both require OSS. Production and test must report identical public/private bucket identities, canonical object keys, media references, CDN base, and private-access behavior; business resources are not environment-prefixed or copied. Optional disposable integration-test mutation is confined to a temporary prefix and cannot overwrite/delete canonical objects. If configuration is missing, identities/checksums drift, any local provider/path/read/mount remains, a public object bypasses CDN, or a private object is publicly exposed, the media page shows a blocking state and disables upload/publication readiness. It provides copyable migration/recheck guidance, but the browser never runs shell migration or receives credentials.
 
 ### 7. Preserve service boundaries and failure behavior
 
 - Main repository: Alembic, canonical content/media tables, public API, migration commands.
-- Admin API: authorized aggregation and commands, provider health, optimistic-version enforcement.
+- Admin API: authorized aggregation and commands, OSS/shared-resource health, optimistic-version enforcement.
 - Admin UI: context/picker/forms/preview only; no authoritative lifecycle inference.
 
-If one section fails to load, other already-loaded sections remain usable and the failure stays scoped. A failed save retains dirty input. A provider audit failure is “unknown/not ready,” never assumed local or OSS. Compatibility endpoints remain until logs show supported clients and bookmarks have moved.
+If one section fails to load, other already-loaded sections remain usable and the failure stays scoped. A failed save retains dirty input. An OSS/shared-resource audit failure is “unknown/not ready” and never falls back to local persistence. Compatibility endpoints remain until logs show supported clients and bookmarks have moved; public legacy asset requests may redirect to CDN but never read local disk.
 
 ## Risks / Trade-offs
 
 - [The combined workspace can become visually dense] → Use section navigation, concise summaries, progressive disclosure, and one sticky scenic-context header rather than one continuous mega-form.
 - [Unsaved guards become inconsistent across sections] → Use one shared dirty registry and navigation interceptor with component tests for switch, refresh, close, and browser navigation.
 - [Legacy records lack a direct media reference graph] → Return explicit unresolved usages and unassigned assets; never guess ownership from filenames.
-- [Admin and main service report different providers] → Treat mismatch as blocking and show both sanitized states with last audit time.
+- [Admin and main service report different OSS identities] → Treat mismatch as blocking and show both sanitized states with last audit time.
+- [Production and test completely share canonical objects] → Display complete public/private identity agreement and temporary-test-prefix status, and block readiness if automated tests can overwrite/delete canonical keys.
 - [Existing automation depends on old endpoints] → Retain delegating compatibility handlers and test response shapes through the observation window.
 
 ## Migration Plan
@@ -80,7 +83,7 @@ If one section fails to load, other already-loaded sections remain usable and th
 2. Add sanitized scenic summaries, unified story mapping, media hierarchy, and provider audit endpoints with authorization and pagination tests.
 3. Ship the scenic shell/picker behind the existing content navigation, verify every legacy/managed edit and dirty-state path, then replace the two old navigation entries with “景点内容”.
 4. Run the main repository's dry-run story migration and verify coverage; enable the unified “城市故事” workspace and redirect old UI state.
-5. Enable hierarchical media UI and audit production. Do not mark rollout complete until the main API and admin report matching OSS and published samples pass.
-6. After the compatibility observation window, separately propose removal of unused UI code/endpoints; do not delete media or schema in this rollout.
+5. Enable hierarchical media UI and audit API/admin plus production/test agreement. Do not mark rollout complete until OSS configuration is mandatory, public/private bucket identities, object keys, references, checksums, CDN and private-access behavior match completely, and no local reference/read/mount remains.
+6. After the compatibility observation window, separately propose removal of unused UI code/endpoints; do not delete OSS media or schema in this rollout.
 
-Rollback restores old navigation components while keeping additive endpoints and story/media mappings. Provider configuration and migrated OSS objects are not rolled back destructively; local read compatibility remains available during the rollback window.
+Rollback restores old navigation components while keeping additive endpoints and story/media mappings. OSS configuration and migrated objects are not rolled back destructively, and rollback must use the same OSS resources; local media persistence/read compatibility is not re-enabled.
