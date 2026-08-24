@@ -19,13 +19,11 @@ os.environ["MEDIA_ROOT"] = str(Path(_TEMP_DIR.name) / "media")
 os.environ["BACKEND_LOGS_ENABLED"] = "false"
 os.environ["LOG_SOURCES"] = "travel-api=deeptravel-api-1"
 os.environ["NARRATION_PROVIDER"] = "fake"
-
-from fastapi.testclient import TestClient  # noqa: E402
-from sqlalchemy import create_engine, inspect, text  # noqa: E402
-from sqlalchemy.orm import Session  # noqa: E402
+os.environ["TESTING"] = "true"
 
 import main  # noqa: E402
 from content_schema import ensure_photo_mission_guidance_schema  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 from models import (  # noqa: E402
     Base,
     ClientRuntimeLog,
@@ -35,6 +33,7 @@ from models import (  # noqa: E402
     NarrationVoiceProfile,
     StoryFragment,
 )
+from narration import NarrationSynthesisError  # noqa: E402
 from runtime_logs.docker_source import (  # noqa: E402
     DockerFrameDecoder,
     DockerLogSource,
@@ -51,8 +50,13 @@ from runtime_logs.storage import (  # noqa: E402
     ensure_client_log_schema,
     query_client_events,
 )
-from runtime_logs.streaming import StreamLimiter, limited_stream, sse_message  # noqa: E402
-from narration import NarrationSynthesisError  # noqa: E402
+from runtime_logs.streaming import (  # noqa: E402
+    StreamLimiter,
+    limited_stream,
+    sse_message,
+)
+from sqlalchemy import create_engine, inspect, text  # noqa: E402
+from sqlalchemy.orm import Session  # noqa: E402
 
 
 class NormalizationTests(unittest.TestCase):
@@ -1168,8 +1172,7 @@ class FragmentedContentApiTests(unittest.TestCase):
         self.assertEqual(deleted.status_code, 204, deleted.text)
         surviving = self.client.get("/api/admin/media", headers=self.headers).json()
         shared_b = next(item for item in surviving if item["key"] == "shared-b")
-        object_path = Path(_TEMP_DIR.name) / "media" / shared_b["object_key"]
-        self.assertTrue(object_path.is_file())
+        self.assertTrue(main.public_object_storage.exists(shared_b["object_key"]))
 
     def test_home_story_review_publish_withdraw_and_stale_track_guard(self):
         imported = self.client.post(

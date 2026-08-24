@@ -13,6 +13,13 @@ from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
 
+from content_graph import validate_graph
+from content_schema import (
+    ensure_footprint_content_schema,
+    ensure_photo_mission_guidance_schema,
+    normalize_experience_tags,
+    normalize_footprint_summary_options,
+)
 from fastapi import (
     Depends,
     FastAPI,
@@ -24,20 +31,7 @@ from fastapi import (
     UploadFile,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
-from pydantic import ValidationError
-from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import create_engine, delete, func, inspect, or_, select
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session, sessionmaker
-
-from content_graph import validate_graph
-from content_schema import (
-    ensure_footprint_content_schema,
-    ensure_photo_mission_guidance_schema,
-    normalize_experience_tags,
-    normalize_footprint_summary_options,
-)
+from fastapi.responses import RedirectResponse, StreamingResponse
 from models import (
     Challenge,
     City,
@@ -45,9 +39,9 @@ from models import (
     FragmentClaim,
     FragmentDependency,
     FragmentNarrationTrack,
-    HomeStoryPublication,
     HistoricalClaim,
     HistoricalSource,
+    HomeStoryPublication,
     Journey,
     JourneyAnswer,
     MediaAsset,
@@ -55,6 +49,7 @@ from models import (
     NarrationVoiceProfile,
     PhotoMission,
     Route,
+    RoutePredepartureTrack,
     RoutePretripGuidance,
     Stop,
     StoryArc,
@@ -73,13 +68,15 @@ from multi_city_import import (
     parse_package,
     persist_preview,
 )
-from object_storage import AlibabaOssObjectStorage, LocalObjectStorage, StoredObject
 from narration import (
     DeterministicNarrationSynthesizer,
     MiniMaxNarrationSynthesizer,
     NarrationRequest,
     NarrationSynthesisError,
 )
+from object_storage import AlibabaOssObjectStorage, InMemoryObjectStorage, StoredObject
+from pydantic import ValidationError
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from runtime_logs.docker_source import DockerLogSource
 from runtime_logs.normalization import (
     NormalizationLimits,
@@ -94,6 +91,9 @@ from runtime_logs.storage import (
 )
 from runtime_logs.streaming import StreamLimiter, limited_stream, sse_message
 from schemas import ChallengeInput, CityInput, ClientLogBatch, RouteInput, StopInput
+from sqlalchemy import create_engine, delete, func, inspect, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -104,11 +104,11 @@ class Settings(BaseSettings):
     database_url: str = (
         "mysql+pymysql://jiandi:jiandi_dev@127.0.0.1:3307/jiandi?charset=utf8mb4"
     )
+    testing: bool = False
     admin_token: str = "dev-only-change-me"
-    media_root: str = "./media"
     cors_origins: str = "http://localhost:3000"
     max_upload_mb: int = 30
-    object_storage_provider: str = "local"
+    object_storage_provider: str = "oss"
     oss_region: str = ""
     oss_endpoint: str = ""
     oss_public_bucket: str = ""
@@ -166,18 +166,19 @@ def parse_log_sources(value: str) -> dict[str, str]:
 settings = Settings()
 engine = create_engine(settings.database_url, pool_pre_ping=True, pool_recycle=1800)
 SessionLocal = sessionmaker(engine, expire_on_commit=False)
-media_root = Path(settings.media_root).resolve()
-media_root.mkdir(parents=True, exist_ok=True)
-if settings.object_storage_provider == "oss":
+if settings.testing:
+    public_object_storage = InMemoryObjectStorage()
+    private_object_storage = InMemoryObjectStorage("https://private.test.invalid")
+elif settings.object_storage_provider == "oss":
     if (
         not settings.oss_region
         or not settings.oss_public_bucket
         or not settings.oss_private_bucket
         or not settings.oss_public_base_url
+        or not settings.oss_access_key_id
+        or not settings.oss_access_key_secret
     ):
-        raise RuntimeError(
-            "OSS 模式必须配置 OSS_REGION、OSS_PUBLIC_BUCKET、OSS_PRIVATE_BUCKET 与 OSS_PUBLIC_BASE_URL"
-        )
+        raise RuntimeError("OSS 运行时必须完整配置区域、公私 Bucket、CDN 与访问凭据")
     public_object_storage = AlibabaOssObjectStorage(
         region=settings.oss_region,
         bucket=settings.oss_public_bucket,
@@ -194,11 +195,10 @@ if settings.object_storage_provider == "oss":
         access_key_id=settings.oss_access_key_id,
         access_key_secret=settings.oss_access_key_secret,
     )
-elif settings.object_storage_provider == "local":
-    public_object_storage = LocalObjectStorage(str(media_root))
-    private_object_storage = LocalObjectStorage(str(media_root / "private-previews"))
 else:
-    raise RuntimeError("OBJECT_STORAGE_PROVIDER 仅支持 local 或 oss")
+    raise RuntimeError(
+        "OBJECT_STORAGE_PROVIDER 运行时仅支持 oss；unit test 请注入内存 fake"
+    )
 if settings.narration_provider == "fake":
     narration_synthesizer = DeterministicNarrationSynthesizer()
 elif settings.narration_provider == "minimax":
@@ -390,8 +390,8 @@ def health(_: Auth, db: Db):
     return {
         "status": "ok",
         "database": "connected",
-        "media_root": str(media_root),
         "media_storage": public_object_storage.provider,
+        "media_readiness": _media_readiness(db),
         "client_log_storage": "connected",
         "backend_logs": "available"
         if settings.backend_logs_enabled and docker_log_source.available
@@ -404,6 +404,7 @@ REQUIRED_CITY_STORY_TABLES = {
     "story_catalog_variants",
     "story_placements",
     "route_pretrip_guidance",
+    "route_predeparture_tracks",
     "content_import_previews",
     "content_import_batches",
 }
@@ -421,7 +422,21 @@ def require_city_story_schema() -> None:
     if missing:
         raise HTTPException(
             503,
-            "主服务数据库尚未升级到 20260823_0013；缺少：" + "、".join(sorted(missing)),
+            "主服务数据库尚未升级到 20260825_0015；缺少：" + "、".join(sorted(missing)),
+        )
+    required_columns = {
+        "introduction_text",
+        "introduction_transcript_hash",
+        "introduction_script_version",
+        "selected_intro_track_id",
+    }
+    missing_columns = required_columns - {
+        column["name"]
+        for column in inspect(engine).get_columns("route_pretrip_guidance")
+    }
+    if missing_columns:
+        raise HTTPException(
+            503, "主服务出发前字段未升级：" + "、".join(sorted(missing_columns))
         )
 
 
@@ -880,8 +895,31 @@ def preview_city_home(city_id: str, _: Auth, db: Db):
 
 
 def _pretrip_payload(
-    item: RoutePretripGuidance | None, route_id: str
+    item: RoutePretripGuidance | None, route_id: str, db: Session | None = None
 ) -> dict[str, Any]:
+    tracks = []
+    if db is not None:
+        tracks = [
+            {
+                "id": track.id,
+                "profile_id": track.profile_id,
+                "script_version": track.script_version,
+                "transcript_hash": track.transcript_hash,
+                "media_path": track.media_path,
+                "mime_type": track.mime_type,
+                "size_bytes": track.size_bytes,
+                "duration_ms": track.duration_ms,
+                "status": track.status,
+                "matches_current_text": bool(
+                    item and track.transcript_hash == item.introduction_transcript_hash
+                ),
+            }
+            for track in db.scalars(
+                select(RoutePredepartureTrack)
+                .where(RoutePredepartureTrack.route_id == route_id)
+                .order_by(RoutePredepartureTrack.updated_at.desc())
+            )
+        ]
     if item is None:
         return {
             "route_id": route_id,
@@ -893,6 +931,11 @@ def _pretrip_payload(
             "accessibility_tips": [],
             "weather_tips": [],
             "offline_roles": [],
+            "introduction_text": "",
+            "introduction_transcript_hash": None,
+            "introduction_script_version": "1",
+            "selected_intro_track_id": None,
+            "tracks": tracks,
             "status": "draft",
             "version": 0,
         }
@@ -906,6 +949,11 @@ def _pretrip_payload(
         "accessibility_tips": item.accessibility_tips_json,
         "weather_tips": item.weather_tips_json,
         "offline_roles": item.offline_roles_json,
+        "introduction_text": item.introduction_text or "",
+        "introduction_transcript_hash": item.introduction_transcript_hash,
+        "introduction_script_version": item.introduction_script_version or "1",
+        "selected_intro_track_id": item.selected_intro_track_id,
+        "tracks": tracks,
         "status": item.status,
         "version": item.version,
         "updated_at": iso(item.updated_at),
@@ -917,7 +965,7 @@ def get_route_pretrip(route_id: str, _: Auth, db: Db):
     require_city_story_schema()
     if db.get(Route, route_id) is None:
         raise HTTPException(404, "路线不存在")
-    return _pretrip_payload(db.get(RoutePretripGuidance, route_id), route_id)
+    return _pretrip_payload(db.get(RoutePretripGuidance, route_id), route_id, db)
 
 
 @app.put("/api/admin/routes/{route_id}/pretrip")
@@ -941,6 +989,40 @@ def save_route_pretrip(route_id: str, payload: dict[str, Any], _: Auth, db: Db):
     if theme_id and db.get(StoryCatalogItem, str(theme_id)) is None:
         raise HTTPException(422, "主题故事不存在")
     item.theme_story_catalog_id = theme_id or None
+    if "introduction_text" in payload:
+        introduction = "\n".join(
+            line.strip()
+            for line in str(payload["introduction_text"]).splitlines()
+            if line.strip()
+        )
+        if len(introduction) > 1200:
+            raise HTTPException(422, "出发前介绍不能超过 1200 字")
+        digest = (
+            hashlib.sha256(introduction.encode("utf-8")).hexdigest()
+            if introduction
+            else None
+        )
+        if digest != item.introduction_transcript_hash:
+            item.selected_intro_track_id = None
+            item.published_at = None
+        item.introduction_text = introduction or None
+        item.introduction_transcript_hash = digest
+        item.introduction_script_version = str(
+            payload.get("introduction_script_version")
+            or item.introduction_script_version
+            or "1"
+        )[:40]
+    if "selected_intro_track_id" in payload:
+        track_id = str(payload.get("selected_intro_track_id") or "") or None
+        track = db.get(RoutePredepartureTrack, track_id) if track_id else None
+        if track and (
+            track.route_id != route_id
+            or track.status != "published"
+            or track.transcript_hash != item.introduction_transcript_hash
+            or track.script_version != item.introduction_script_version
+        ):
+            raise HTTPException(422, "只能选择当前文字版本对应的已审核音频")
+        item.selected_intro_track_id = track_id
     for source_field, target_field in {
         "story_directions": "story_directions_json",
         "companion_tags": "companion_tags_json",
@@ -956,7 +1038,7 @@ def save_route_pretrip(route_id: str, payload: dict[str, Any], _: Auth, db: Db):
     item.version += 1
     item.updated_at = now
     db.commit()
-    return _pretrip_payload(item, route_id)
+    return _pretrip_payload(item, route_id, db)
 
 
 @app.post("/api/admin/routes/{route_id}/pretrip/{action}")
@@ -967,11 +1049,20 @@ def transition_route_pretrip(route_id: str, action: str, _: Auth, db: Db):
         raise HTTPException(404, "出发前内容不存在")
     now = datetime.now(UTC)
     if action == "publish":
-        if not item.theme_story_catalog_id:
-            raise HTTPException(422, "发布前必须配置主题故事")
-        story = db.get(StoryCatalogItem, item.theme_story_catalog_id)
-        if story is None or story.status != "published":
-            raise HTTPException(422, "主题故事尚未发布")
+        if not item.introduction_text or not item.introduction_transcript_hash:
+            raise HTTPException(422, "发布前必须填写出发前介绍")
+        track = (
+            db.get(RoutePredepartureTrack, item.selected_intro_track_id)
+            if item.selected_intro_track_id
+            else None
+        )
+        if not track or track.status != "published" or track.route_id != route_id:
+            raise HTTPException(422, "发布前必须选择已审核音频")
+        if (
+            track.transcript_hash != item.introduction_transcript_hash
+            or track.script_version != item.introduction_script_version
+        ):
+            raise HTTPException(422, "文字已变化，请重新审核匹配音频")
         item.status = "published"
         item.reviewed_at = now
         item.published_at = now
@@ -983,7 +1074,96 @@ def transition_route_pretrip(route_id: str, action: str, _: Auth, db: Db):
     item.version += 1
     item.updated_at = now
     db.commit()
-    return _pretrip_payload(item, route_id)
+    return _pretrip_payload(item, route_id, db)
+
+
+@app.post("/api/admin/routes/{route_id}/pretrip/audio", status_code=201)
+def upload_route_predeparture_audio(
+    route_id: str,
+    _: Auth,
+    db: Db,
+    file: Annotated[UploadFile, File()],
+    profile_id: Annotated[str, Form()],
+    duration_ms: Annotated[int, Form()] = 0,
+):
+    item = db.get(RoutePretripGuidance, route_id)
+    if (
+        item is None
+        or not item.introduction_transcript_hash
+        or not item.introduction_script_version
+    ):
+        raise HTTPException(422, "请先保存出发前介绍文字")
+    if db.get(NarrationVoiceProfile, profile_id) is None:
+        raise HTTPException(422, "旁白音色不存在")
+    existing_track = db.scalar(
+        select(RoutePredepartureTrack).where(
+            RoutePredepartureTrack.route_id == route_id,
+            RoutePredepartureTrack.profile_id == profile_id,
+            RoutePredepartureTrack.transcript_hash == item.introduction_transcript_hash,
+            RoutePredepartureTrack.script_version == item.introduction_script_version,
+        )
+    )
+    if existing_track is not None:
+        return {"track": next(
+            row for row in _pretrip_payload(item, route_id, db)["tracks"]
+            if row["id"] == existing_track.id
+        ), "idempotent": True}
+    if not file.content_type or not file.content_type.startswith("audio/"):
+        raise HTTPException(415, "请选择音频文件")
+    payload = file.file.read(settings.max_upload_mb * 1024 * 1024 + 1)
+    if not payload or len(payload) > settings.max_upload_mb * 1024 * 1024:
+        raise HTTPException(413, f"音频不能为空且不能超过 {settings.max_upload_mb}MB")
+    checksum = hashlib.sha256(payload).hexdigest()
+    suffix = Path(file.filename or "intro.mp3").suffix.lower() or ".mp3"
+    object_key = (
+        f"public/predeparture/{route_id}/"
+        f"{item.introduction_transcript_hash}/{checksum}{suffix}"
+    )
+    uploaded_now = not public_object_storage.exists(object_key)
+    if uploaded_now:
+        public_object_storage.put(object_key, payload, file.content_type)
+    now = datetime.now(UTC)
+    track = RoutePredepartureTrack(
+        id=str(uuid4()),
+        route_id=route_id,
+        profile_id=profile_id,
+        transcript_hash=item.introduction_transcript_hash,
+        script_version=item.introduction_script_version,
+        media_path=public_object_storage.public_url(object_key),
+        mime_type=file.content_type,
+        size_bytes=len(payload),
+        duration_ms=max(1, duration_ms),
+        checksum_sha256=checksum,
+        generation_metadata_json={
+            "source": "operator_upload",
+            "object_key": object_key,
+        },
+        status="published",
+        reviewed_at=now,
+        published_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(track)
+    db.add(MediaAsset(
+        key=f"predeparture-{track.id}", storage_path=object_key,
+        mime_type=file.content_type, storage_provider="oss", object_key=object_key,
+        canonical_url=track.media_path, visibility="public", size_bytes=len(payload),
+        checksum_sha256=checksum,
+        metadata_json={"usage": "predeparture", "route_id": route_id},
+        created_at=now, updated_at=now,
+    ))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        if uploaded_now:
+            public_object_storage.delete(object_key)
+        raise
+    return {"track": next(
+        row for row in _pretrip_payload(item, route_id, db)["tracks"]
+        if row["id"] == track.id
+    ), "idempotent": False}
 
 
 def _package_error(exc: PackageValidationError) -> HTTPException:
@@ -1572,6 +1752,141 @@ def list_media(request: Request, _: Auth, db: Db, q: str = ""):
     ]
 
 
+def _safe_identity(value: str) -> str:
+    return (
+        hashlib.sha256(value.encode("utf-8")).hexdigest()[:12] if value else "missing"
+    )
+
+
+def _media_readiness(db: Session) -> dict[str, Any]:
+    local_assets = (
+        db.scalar(
+            select(func.count())
+            .select_from(MediaAsset)
+            .where(MediaAsset.storage_provider != "oss")
+        )
+        or 0
+    )
+    public_count = (
+        db.scalar(
+            select(func.count())
+            .select_from(MediaAsset)
+            .where(MediaAsset.visibility == "public")
+        )
+        or 0
+    )
+    private_tracks = db.scalar(select(func.count()).select_from(NarrationPreview)) or 0
+    blockers = []
+    if (
+        public_object_storage.provider != "oss"
+        or private_object_storage.provider != "oss"
+    ):
+        blockers.append("runtime_provider_not_oss")
+    if local_assets:
+        blockers.append(f"local_media_references:{local_assets}")
+    return {
+        "ready": not blockers,
+        "environment": "shared-production-test-resources",
+        "provider": "oss",
+        "public_bucket_identity": _safe_identity(settings.oss_public_bucket),
+        "private_bucket_identity": _safe_identity(settings.oss_private_bucket),
+        "cdn_base": settings.oss_public_base_url.rstrip("/"),
+        "public_count": public_count,
+        "private_count": private_tracks,
+        "canonical_resource_set": "identical-for-production-and-test",
+        "private_delivery": "authorized-signed-get",
+        "local_blockers": local_assets,
+        "blockers": blockers,
+        "audit_time": datetime.now(UTC).isoformat(),
+    }
+
+
+@app.get("/api/admin/media/readiness")
+def media_readiness(_: Auth, db: Db):
+    return _media_readiness(db)
+
+
+@app.get("/api/admin/media/hierarchy")
+def media_hierarchy(_: Auth, db: Db):
+    assets = {item.storage_path: item for item in db.scalars(select(MediaAsset))}
+    aliases = {
+        alias: path
+        for path, asset in assets.items()
+        for alias in (path, asset.object_key, asset.canonical_url)
+        if alias
+    }
+    groups: dict[str, dict[str, Any]] = {}
+    usages: dict[str, list[dict[str, str]]] = {path: [] for path in assets}
+    for city in db.scalars(select(City)):
+        groups[city.id] = {"id": city.id, "name": city.name, "scenics": []}
+        city_asset = aliases.get(city.hero_image)
+        if city_asset:
+            usages[city_asset].append(
+                {"city_id": city.id, "scenic_id": "", "role": "城市封面"}
+            )
+    for route, city_name in db.execute(
+        select(Route, City.name).join(City, City.id == Route.city_id)
+    ):
+        scenic = {
+            "id": route.id,
+            "title": route.title,
+            "cover": route.hero_image,
+            "status": route.content_status,
+            "assets": [],
+        }
+        groups[route.city_id]["scenics"].append(scenic)
+        refs: list[tuple[str | None, str]] = [(route.hero_image, "景点封面")]
+        refs.extend(
+            (stop.image, f"{stop.title} · 图片")
+            for stop in db.scalars(select(Stop).where(Stop.route_id == route.id))
+        )
+        refs.extend(
+            (stop.audio_url, f"{stop.title} · 旁白")
+            for stop in db.scalars(select(Stop).where(Stop.route_id == route.id))
+        )
+        refs.extend(
+            (track.media_path, "出发前音频")
+            for track in db.scalars(
+                select(RoutePredepartureTrack).where(
+                    RoutePredepartureTrack.route_id == route.id
+                )
+            )
+        )
+        seen: set[str] = set()
+        for reference, role in refs:
+            path = aliases.get(reference or "")
+            if not path:
+                continue
+            usages[path].append(
+                {"city_id": route.city_id, "scenic_id": route.id, "role": role}
+            )
+            if path not in seen:
+                scenic["assets"].append(path)
+                seen.add(path)
+    serialized = {
+        path: {
+            "key": asset.key,
+            "object_key": asset.object_key or path,
+            "mime_type": asset.mime_type,
+            "size_bytes": asset.size_bytes,
+            "checksum_sha256": asset.checksum_sha256,
+            "scope": asset.visibility,
+            "delivery": asset.canonical_url
+            if asset.visibility == "public"
+            else "protected-signed-get",
+            "reference_count": len(usages[path]),
+            "usages": usages[path],
+        }
+        for path, asset in assets.items()
+    }
+    return {
+        "cities": list(groups.values()),
+        "assets": serialized,
+        "unassigned": [path for path, refs in usages.items() if not refs],
+        "readiness": _media_readiness(db),
+    }
+
+
 @app.post("/api/admin/media", status_code=201)
 def upload_media(
     _: Auth,
@@ -1722,24 +2037,15 @@ def delete_media(asset_key: str, _: Auth, db: Db):
     )
     if item.object_key and not shared_object:
         public_object_storage.delete(item.object_key)
-    elif not item.object_key and item.storage_provider == "local":
-        candidate = (media_root / item.storage_path).resolve()
-        if media_root == candidate or media_root in candidate.parents:
-            candidate.unlink(missing_ok=True)
     db.delete(item)
     db.commit()
 
 
 @app.get("/media/{asset_path:path}")
 def serve_media(asset_path: str):
-    if public_object_storage.provider != "local":
-        raise HTTPException(404)
-    candidate = (media_root / asset_path).resolve()
-    if media_root != candidate and media_root not in candidate.parents:
-        raise HTTPException(404)
-    if not candidate.is_file():
-        raise HTTPException(404)
-    return FileResponse(candidate)
+    return RedirectResponse(
+        public_object_storage.public_url(asset_path), status_code=308
+    )
 
 
 def narration_preview_dict(item: NarrationPreview) -> dict[str, Any]:
@@ -4096,7 +4402,9 @@ def _publication_validation(db: Session, route: Route) -> dict[str, Any]:
                     {
                         "path": f"fragments[{index}].audio_path",
                         "code": "narration_not_approved",
-                        "message": "当前文字稿已有试听版本，发布前必须批准与文字稿一致的旁白",
+                        "message": (
+                            "当前文字稿已有试听版本，发布前必须批准与文字稿一致的旁白"
+                        ),
                     }
                 )
         result["valid"] = not result["errors"]
@@ -4172,23 +4480,26 @@ def import_fragmented_route(payload: dict[str, Any], _: Auth, db: Db):
                 select(MediaAsset).where(MediaAsset.checksum_sha256 == checksum)
             )
         if item is None:
-            if public_object_storage.provider != "local":
-                raise HTTPException(422, f"请先在媒体库上传并登记资源：{asset_key}")
-            candidate = (media_root / storage_path).resolve()
-            if (
-                media_root != candidate and media_root not in candidate.parents
-            ) or not candidate.is_file():
-                raise HTTPException(422, f"媒体文件不存在：{storage_path}")
+            if not settings.testing:
+                raise HTTPException(422, f"请先将资源上传 OSS 并登记：{asset_key}")
+            fake_payload = storage_path.encode("utf-8")
+            object_key = f"unit-test/import/{hashlib.sha256(fake_payload).hexdigest()}"
+            if not public_object_storage.exists(object_key):
+                public_object_storage.put(object_key, fake_payload, mime_type)
             db.add(
                 MediaAsset(
                     key=asset_key,
                     storage_path=storage_path,
                     mime_type=mime_type,
-                    storage_provider="local",
-                    object_key=storage_path,
+                    storage_provider="memory",
+                    object_key=object_key,
+                    canonical_url=public_object_storage.public_url(object_key),
                     visibility="public",
-                    size_bytes=candidate.stat().st_size,
-                    metadata_json={},
+                    size_bytes=len(fake_payload),
+                    checksum_sha256=(
+                        checksum or hashlib.sha256(fake_payload).hexdigest()
+                    ),
+                    metadata_json={"unit_test_fake": True},
                     created_at=now,
                     updated_at=now,
                 )

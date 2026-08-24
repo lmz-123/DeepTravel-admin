@@ -517,6 +517,16 @@ class RoutePretripGuidance(Base):
     accessibility_tips_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     weather_tips_json: Mapped[list[str]] = mapped_column(JSON, default=list)
     offline_roles_json: Mapped[list[str]] = mapped_column(JSON, default=list)
+    introduction_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    introduction_transcript_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    introduction_script_version: Mapped[str | None] = mapped_column(
+        String(40), nullable=True
+    )
+    selected_intro_track_id: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True
+    )
     status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     reviewed_at: Mapped[datetime | None] = mapped_column(
@@ -525,6 +535,45 @@ class RoutePretripGuidance(Base):
     published_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RoutePredepartureTrack(Base):
+    __tablename__ = "route_predeparture_tracks"
+    __table_args__ = (
+        UniqueConstraint(
+            "route_id",
+            "profile_id",
+            "transcript_hash",
+            "script_version",
+            name="uq_route_predeparture_voice_script",
+        ),
+        Index("ix_route_predeparture_tracks_hash_status", "transcript_hash", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    route_id: Mapped[str] = mapped_column(
+        ForeignKey("routes.id", ondelete="CASCADE"), index=True
+    )
+    profile_id: Mapped[str] = mapped_column(
+        ForeignKey("narration_voice_profiles.id"), index=True
+    )
+    transcript_hash: Mapped[str] = mapped_column(String(64), index=True)
+    script_version: Mapped[str] = mapped_column(String(40))
+    media_path: Mapped[str] = mapped_column(String(500))
+    mime_type: Mapped[str] = mapped_column(String(80), default="audio/mpeg")
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    checksum_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    generation_metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="draft", index=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    published_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 

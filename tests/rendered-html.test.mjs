@@ -30,9 +30,10 @@ test("server-renders the DeepTravel admin application", async () => {
 
   const html = await response.text();
   assert.match(html, /<title>简地内容中台<\/title>/i);
-  assert.match(html, /碎片导览/);
+  assert.match(html, /景点内容/);
+  assert.match(html, /城市故事/);
   assert.match(html, /运行日志/);
-  assert.match(html, /<span>11<\/span>运行日志/);
+  assert.match(html, /<span>09<\/span>运行日志/);
   assert.doesNotMatch(html, /codex-preview|Your site is taking shape|Building your site/i);
 });
 
@@ -46,9 +47,13 @@ test("keeps the realtime log surface connected to the independent admin API", as
 
   assert.match(page, /<AdminApp \/>/);
   assert.match(layout, /简地内容中台/);
-  assert.match(admin, /"fragmented", "04", "碎片导览"/);
-  assert.match(admin, /"catalog", "06", "城市故事与出发前"/);
-  assert.match(admin, /"logs", "11", "运行日志"/);
+  assert.match(admin, /"scenic", "04", "景点内容"/);
+  assert.match(admin, /"catalog", "05", "城市故事"/);
+  assert.match(admin, /"logs", "09", "运行日志"/);
+  assert.doesNotMatch(admin, /\["stories"[^\]]*"首页听故事"/);
+  assert.match(admin, /aria-label="选择景点"/);
+  assert.match(admin, /\/media\/hierarchy/);
+  assert.match(admin, /pretrip\/audio/);
   assert.match(admin, /\/multi-city-import\/preview/);
   assert.match(admin, /确认写入草稿区/);
   assert.match(admin, /\/fragmented-routes\/import/);

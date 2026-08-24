@@ -14,10 +14,9 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       ADMIN_TOKEN: ${ADMIN_TOKEN}
-      MEDIA_ROOT: /data/media
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-30}
-      OBJECT_STORAGE_PROVIDER: ${OBJECT_STORAGE_PROVIDER:-local}
+      OBJECT_STORAGE_PROVIDER: oss
       OSS_REGION: ${OSS_REGION:-}
       OSS_ENDPOINT: ${OSS_ENDPOINT:-}
       OSS_PUBLIC_BUCKET: ${OSS_PUBLIC_BUCKET:-}
@@ -53,7 +52,6 @@ services:
     ports:
       - "5100:5100"
     volumes:
-      - ${MEDIA_HOST_PATH:-./media}:/data/media
       - ${DOCKER_SOCKET_HOST_PATH:-/var/run/docker.sock}:/var/run/docker.sock:ro
     healthcheck:
       test: ["CMD", "python", "-c", "import os, urllib.request; req=urllib.request.Request('http://localhost:5100/api/admin/health', headers={'Authorization': 'Bearer '+os.environ['ADMIN_TOKEN']}); urllib.request.urlopen(req)"]

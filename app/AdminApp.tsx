@@ -15,10 +15,8 @@ type Tab =
   | "dashboard"
   | "cities"
   | "routes"
-  | "fragmented"
-  | "stories"
+  | "scenic"
   | "catalog"
-  | "stops"
   | "challenges"
   | "media"
   | "import"
@@ -88,6 +86,17 @@ type Media = {
   mime_type: string;
   preview_url: string;
   updated_at: string;
+  storage_provider?: string;
+  object_key?: string;
+  canonical_url?: string;
+  size_bytes?: number;
+  checksum_sha256?: string;
+};
+type MediaHierarchy = {
+  cities: Array<{ id: string; name: string; scenics: Array<{ id: string; title: string; status: string; assets: string[] }> }>;
+  assets: Record<string, { key: string; object_key: string; mime_type: string; size_bytes?: number; checksum_sha256?: string; scope: string; delivery: string; reference_count: number; usages: Array<{ role: string }> }>;
+  unassigned: string[];
+  readiness: { ready: boolean; cdn_base: string; public_count: number; private_count: number; canonical_resource_set: string; blockers: string[] };
 };
 type Dashboard = {
   cities: number;
@@ -265,23 +274,19 @@ const navItems: Array<[Tab, string, string]> = [
   ["dashboard", "01", "总览"],
   ["cities", "02", "城市"],
   ["routes", "03", "路线"],
-  ["fragmented", "04", "碎片导览"],
-  ["stories", "05", "首页听故事"],
-  ["catalog", "06", "城市故事与出发前"],
-  ["stops", "07", "站点与故事"],
-  ["challenges", "08", "题目"],
-  ["media", "09", "媒体库"],
-  ["import", "10", "批量导入"],
-  ["logs", "11", "运行日志"],
+  ["scenic", "04", "景点内容"],
+  ["catalog", "05", "城市故事"],
+  ["challenges", "06", "题目"],
+  ["media", "07", "媒体库"],
+  ["import", "08", "批量导入"],
+  ["logs", "09", "运行日志"],
 ];
 const titles: Record<Tab, [string, string]> = {
   dashboard: ["内容总览", "CONTENT OPERATIONS"],
   cities: ["城市管理", "DESTINATIONS"],
   routes: ["路线管理", "CURATED ROUTES"],
-  fragmented: ["碎片导览配置", "FRAGMENTED AUDIO ROUTES"],
-  stories: ["首页听故事", "CURATED STORY LISTENING"],
-  catalog: ["城市故事与出发前", "CITY STORY DISTRIBUTION"],
-  stops: ["站点与故事", "STORIES & PLACES"],
+  scenic: ["景点内容", "SCENIC CONTENT"],
+  catalog: ["城市故事", "CITY STORY DISTRIBUTION"],
   challenges: ["问题管理", "CHALLENGES"],
   media: ["媒体资源", "MEDIA LIBRARY"],
   import: ["批量导入", "CONTENT IMPORT"],
@@ -561,7 +566,7 @@ export default function AdminApp() {
                 ＋ 新建路线
               </button>
             )}
-            {active === "stops" && (
+            {active === "scenic" && (
               <button
                 className="primary-button"
                 onClick={() => setEditor({ kind: "stop" })}
@@ -606,31 +611,23 @@ export default function AdminApp() {
                 onTransition={transitionRoute}
               />
             )}
-            {active === "fragmented" && (
-              <FragmentedRouteWorkspace
+            {active === "scenic" && (
+              <ScenicContentWorkspace
                 routes={routes}
+                stops={stops}
                 media={media}
                 request={request}
                 setNotice={setNotice}
                 onChanged={() => refresh()}
+                onEditStop={(item) => setEditor({ kind: "stop", item })}
+                onDeleteStop={(item) => remove("stop", item.id, item.title)}
               />
-            )}
-            {active === "stories" && (
-              <HomeStoriesWorkspace request={request} setNotice={setNotice} />
             )}
             {active === "catalog" && (
               <CityStoryCatalogWorkspace
                 cities={cities}
-                routes={routes}
                 request={request}
                 setNotice={setNotice}
-              />
-            )}
-            {active === "stops" && (
-              <StopsView
-                rows={stops}
-                onEdit={(item) => setEditor({ kind: "stop", item })}
-                onDelete={(item) => remove("stop", item.id, item.title)}
               />
             )}
             {active === "challenges" && (
@@ -811,7 +808,7 @@ function DashboardView({
             label="增加故事"
             help="为路线补充站点内容"
             icon="故"
-            onClick={() => onCreate("stops", "stop")}
+            onClick={() => onCreate("scenic", "stop")}
           />
           <Quick
             label="增加问题"
@@ -1041,6 +1038,12 @@ function MediaView({
   setNotice: (x: string) => void;
 }) {
   const [uploading, setUploading] = useState(false);
+  const [hierarchy, setHierarchy] = useState<MediaHierarchy | null>(null);
+  const loadHierarchy = useCallback(async () => {
+    try { setHierarchy(await request<MediaHierarchy>("/media/hierarchy")); }
+    catch (error) { setNotice(error instanceof Error ? error.message : "媒体层级读取失败"); }
+  }, [request, setNotice]);
+  useEffect(() => { const timer = window.setTimeout(() => void loadHierarchy(), 0); return () => window.clearTimeout(timer); }, [loadHierarchy]);
   async function upload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setUploading(true);
@@ -1049,6 +1052,7 @@ function MediaView({
       await request("/media", { method: "POST", body });
       event.currentTarget.reset();
       onChanged();
+      await loadHierarchy();
     } catch (e) {
       setNotice(e instanceof Error ? e.message : "上传失败");
     } finally {
@@ -1065,7 +1069,7 @@ function MediaView({
         <div>
           <p className="eyebrow">UPLOAD ASSET</p>
           <h2>上传图片或音频</h2>
-          <p>上传后会写入服务器媒体目录，并在数据库登记资源路径。</p>
+          <p>生产与测试共用同一套 OSS 对象；公共资源经 CDN 交付，私有资源只走鉴权访问。</p>
         </div>
         <form onSubmit={upload}>
           <label className="file-drop">
@@ -1079,41 +1083,35 @@ function MediaView({
         </form>
       </section>
       <ResourcePanel
-        eyebrow="ASSET LIBRARY"
-        title={`${rows.length} 项媒体资源`}
+        eyebrow="OSS ASSET HIERARCHY"
+        title="城市 → 景点 → 资源"
       >
-        <div className="media-grid">
-          {rows.map((item) => (
-            <article className="media-card" key={item.key}>
-              <div className="media-preview">
-                {item.mime_type.startsWith("image/") ? (
-                  <img src={item.preview_url} alt="" />
-                ) : (
-                  <span>音频</span>
-                )}
-              </div>
-              <div>
-                <strong>{item.key}</strong>
-                <small>{item.storage_path}</small>
-                <em>{item.mime_type}</em>
-              </div>
-              <div className="media-actions">
-                <button onClick={() => copy(item.storage_path)}>
-                  复制路径
-                </button>
-                <button className="danger-link" onClick={() => onDelete(item)}>
-                  删除
-                </button>
-              </div>
-            </article>
-          ))}
-          {!rows.length && <TableEmpty text="还没有媒体资源" />}
-        </div>
+        {!hierarchy ? <p>正在读取 OSS 资源关系…</p> : <>
+          <div className={hierarchy.readiness.ready ? "readiness-ok" : "readiness-blocked"}>
+            <strong>{hierarchy.readiness.ready ? "OSS 共用资源已就绪" : "OSS 就绪检查未通过"}</strong>
+            <span>公共 {hierarchy.readiness.public_count} · 私有 {hierarchy.readiness.private_count} · {hierarchy.readiness.cdn_base}</span>
+            {!!hierarchy.readiness.blockers.length && <span>{hierarchy.readiness.blockers.join("；")}。请先迁移并重新检查，浏览器不会执行迁移命令。</span>}
+          </div>
+          <div className="media-tree">
+            {hierarchy.cities.map((city) => <details key={city.id}><summary>{city.name}<span>{city.scenics.reduce((count, scenic) => count + scenic.assets.length, 0)} 项引用</span></summary>
+              {city.scenics.map((scenic) => <details key={scenic.id}><summary>{scenic.title}<span>{scenic.assets.length} 项 · {storyStatusLabel(scenic.status)}</span></summary><div className="media-tree-assets">{scenic.assets.map((path) => <MediaHierarchyRow key={path} path={path} asset={hierarchy.assets[path]} rows={rows} copy={copy} onDelete={onDelete} />)}{!scenic.assets.length && <p className="muted">该景点暂无已登记资源</p>}</div></details>)}
+            </details>)}
+            <details><summary>未归属资源<span>{hierarchy.unassigned.length} 项</span></summary><div className="media-tree-assets">{hierarchy.unassigned.map((path) => <MediaHierarchyRow key={path} path={path} asset={hierarchy.assets[path]} rows={rows} copy={copy} onDelete={onDelete} />)}</div></details>
+          </div>
+        </>}
       </ResourcePanel>
     </>
   );
 }
 
+function MediaHierarchyRow({ path, asset, rows, copy, onDelete }: { path: string; asset: MediaHierarchy["assets"][string]; rows: Media[]; copy: (path: string) => void; onDelete: (item: Media) => void }) {
+  const row = rows.find((item) => item.key === asset?.key);
+  if (!asset) return null;
+  return <article className="media-tree-row"><div><strong>{asset.key}</strong><small>{asset.scope === "public" ? "公共 OSS · CDN" : "私有 OSS · 鉴权访问"} · {asset.mime_type}</small><code>{asset.object_key}</code><small>{asset.reference_count} 处引用 · {(asset.usages || []).map((usage) => usage.role).join("、")}</small></div><div className="media-actions"><button onClick={() => copy(path)}>复制对象引用</button>{row && <button className="danger-link" onClick={() => onDelete(row)}>删除</button>}</div></article>;
+}
+
+// Kept temporarily for rollback compatibility; no active navigation points here.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 function HomeStoriesWorkspace({
   request,
   setNotice,
@@ -1469,14 +1467,131 @@ function HomeStoriesWorkspace({
   );
 }
 
+function ScenicContentWorkspace({
+  routes,
+  stops,
+  media,
+  request,
+  setNotice,
+  onChanged,
+  onEditStop,
+  onDeleteStop,
+}: {
+  routes: Route[];
+  stops: Stop[];
+  media: Media[];
+  request: <T>(p: string, i?: RequestInit) => Promise<T>;
+  setNotice: (x: string) => void;
+  onChanged: () => void;
+  onEditStop: (x: Stop) => void;
+  onDeleteStop: (x: Stop) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [routeId, setRouteId] = useState("");
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams(window.location.search);
+      const recent = params.get("scenic") || localStorage.getItem("jiandi-recent-scenic") || "";
+      setRouteId(routes.some((route) => route.id === recent) ? recent : routes[0]?.id || "");
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [routes]);
+  const selected = routes.find((route) => route.id === routeId);
+  const filtered = routes.filter((route) =>
+    `${route.city_name || ""} ${route.title} ${route.slug}`.toLowerCase().includes(query.trim().toLowerCase()),
+  );
+  const grouped = filtered.reduce<Record<string, Route[]>>((result, route) => {
+    (result[route.city_name || "未命名城市"] ||= []).push(route);
+    return result;
+  }, {});
+  function choose(next: Route) {
+    setRouteId(next.id);
+    localStorage.setItem("jiandi-recent-scenic", next.id);
+    const url = new URL(window.location.href);
+    url.searchParams.set("scenic", next.id);
+    window.history.replaceState(null, "", url);
+    setPickerOpen(false);
+  }
+  return (
+    <section className="scenic-shell">
+      <article className="panel scenic-context">
+        <div>
+          <p className="eyebrow">SELECTED SCENIC</p>
+          <h2>{selected ? `${selected.city_name} · ${selected.title}` : "请选择景点"}</h2>
+          <p>{selected ? `${selected.stop_count} 个站点 · ${storyStatusLabel(selected.content_status)}` : "选择后集中维护站点、碎片、标签和出发前内容。"}</p>
+        </div>
+        <button className="primary-button" onClick={() => setPickerOpen(true)}>选择景点</button>
+      </article>
+      {pickerOpen && (
+        <div className="modal-backdrop">
+          <section className="modal scenic-picker" role="dialog" aria-modal="true" aria-label="选择景点">
+            <div className="modal-head"><div><p className="eyebrow">SCENIC PICKER</p><h2>选择景点</h2></div><button aria-label="关闭景点选择" onClick={() => setPickerOpen(false)}>×</button></div>
+            <input aria-label="搜索景点" placeholder="搜索城市、景点名称或 slug" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <div className="scenic-groups">
+              {Object.entries(grouped).map(([city, rows]) => <section key={city}><h3>{city}</h3><div className="scenic-options">{rows.map((route) => <button key={route.id} className={route.id === routeId ? "scenic-option selected" : "scenic-option"} onClick={() => choose(route)}><span className="scenic-cover">{route.hero_image ? <img src={route.hero_image} alt="" /> : route.title.slice(0, 1)}</span><span><strong>{route.title}</strong><small>{route.stop_count} 个站点 · {storyStatusLabel(route.content_status)}</small></span></button>)}</div></section>)}
+              {!filtered.length && <TableEmpty text="没有匹配的景点" />}
+            </div>
+          </section>
+        </div>
+      )}
+      {selected && <>
+        <PredepartureEditor key={`pretrip-${routeId}`} route={selected} request={request} setNotice={setNotice} />
+        <StopsView rows={stops.filter((stop) => stop.route_id === routeId)} onEdit={onEditStop} onDelete={onDeleteStop} />
+        <FragmentedRouteWorkspace key={`fragmented-${routeId}`} routes={routes} selectedRouteId={routeId} media={media} request={request} setNotice={setNotice} onChanged={onChanged} />
+      </>}
+    </section>
+  );
+}
+
+function PredepartureEditor({ route, request, setNotice }: { route: Route; request: <T>(p: string, i?: RequestInit) => Promise<T>; setNotice: (x: string) => void }) {
+  const [pretrip, setPretrip] = useState<Data | null>(null);
+  const [profiles, setProfiles] = useState<NarrationProfileView[]>([]);
+  const load = useCallback(async () => {
+    try {
+      const [content, voiceProfiles] = await Promise.all([request<Data>(`/routes/${route.id}/pretrip`), request<NarrationProfileView[]>("/narration/profiles")]);
+      setPretrip(content); setProfiles(voiceProfiles);
+    } catch (error) { setNotice(error instanceof Error ? error.message : "出发前内容读取失败"); }
+  }, [request, route.id, setNotice]);
+  useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      setPretrip(await request<Data>(`/routes/${route.id}/pretrip`, { method: "PUT", body: JSON.stringify({ expected_version: num(pretrip?.version, 0), introduction_text: String(form.get("introduction_text") || ""), introduction_script_version: String(form.get("introduction_script_version") || "1"), selected_intro_track_id: String(form.get("selected_intro_track_id") || "") || null }) }));
+      setNotice("出发前内容已保存");
+    } catch (error) { setNotice(error instanceof Error ? error.message : "出发前内容保存失败"); }
+  }
+  async function upload(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try { await request(`/routes/${route.id}/pretrip/audio`, { method: "POST", body: new FormData(event.currentTarget) }); await load(); setNotice("出发前音频已上传 OSS 并通过审核"); }
+    catch (error) { setNotice(error instanceof Error ? error.message : "音频上传失败"); }
+  }
+  async function transition(action: string) { try { await request(`/routes/${route.id}/pretrip/${action}`, { method: "POST" }); await load(); setNotice(action === "publish" ? "出发前内容已发布" : "出发前内容已撤回"); } catch (error) { setNotice(error instanceof Error ? error.message : "状态更新失败"); } }
+  return <ResourcePanel eyebrow="PRE-DEPARTURE" title="出发前介绍与语音">
+    {!pretrip ? <p>正在读取…</p> : <>
+      <form className="form-grid" onSubmit={save}>
+        <Field label="简短介绍"><textarea name="introduction_text" rows={6} maxLength={1200} defaultValue={str(pretrip.introduction_text)} required /></Field>
+        <Field label="文字版本"><input name="introduction_script_version" defaultValue={str(pretrip.introduction_script_version) || "1"} required /></Field>
+        <Field label="匹配的已审核语音"><select name="selected_intro_track_id" defaultValue={str(pretrip.selected_intro_track_id)}><option value="">尚未选择</option>{(pretrip.tracks as Data[] || []).filter((track) => track.matches_current_text && track.status === "published").map((track) => <option key={str(track.id)} value={str(track.id)}>{str(track.profile_id)} · {Math.round(num(track.duration_ms) / 1000)} 秒</option>)}</select></Field>
+        <div className="import-actions"><button className="primary-button">保存</button>{pretrip.status === "published" ? <button type="button" onClick={() => void transition("withdraw")}>撤回</button> : <button type="button" onClick={() => void transition("publish")}>发布</button>}</div>
+      </form>
+      <form className="inline-upload" onSubmit={upload}><input name="file" type="file" accept="audio/*" required /><select name="profile_id" required><option value="">选择音色</option>{profiles.filter((profile) => profile.status === "published").map((profile) => <option key={profile.id} value={profile.id}>{profile.display_name}</option>)}</select><input name="duration_ms" type="number" min="1" placeholder="时长（毫秒）" required /><button>上传至公共 OSS</button></form>
+      <p className="muted">客户端只显示紧凑播放图标；修改文字会立即使旧音频失效。</p>
+    </>}
+  </ResourcePanel>;
+}
+
 function FragmentedRouteWorkspace({
   routes,
+  selectedRouteId,
   media,
   request,
   setNotice,
   onChanged,
 }: {
   routes: Route[];
+  selectedRouteId?: string;
   media: Media[];
   request: <T>(p: string, i?: RequestInit) => Promise<T>;
   setNotice: (x: string) => void;
@@ -1485,9 +1600,7 @@ function FragmentedRouteWorkspace({
   const managedRoutes = routes.filter(
     (route) => Boolean(route.published_at) || route.stop_count > 0,
   );
-  const [routeId, setRouteId] = useState(
-    managedRoutes[0]?.id || routes[0]?.id || "",
-  );
+  const [routeId] = useState(selectedRouteId || managedRoutes[0]?.id || routes[0]?.id || "");
   const [graph, setGraph] = useState<RouteGraph | null>(null);
   const [validation, setValidation] = useState<GraphValidation | null>(null);
   const [jsonMode, setJsonMode] = useState(false);
@@ -1756,18 +1869,7 @@ function FragmentedRouteWorkspace({
           </p>
         </div>
         <div className="fragmented-actions">
-          <select
-            aria-label="选择路线"
-            value={routeId}
-            onChange={(event) => setRouteId(event.target.value)}
-          >
-            <option value="">选择路线</option>
-            {routes.map((route) => (
-              <option value={route.id} key={route.id}>
-                {route.city_name} · {route.title}
-              </option>
-            ))}
-          </select>
+          <strong>{routes.find((route) => route.id === routeId)?.title}</strong>
           <button
             className="ghost-button"
             onClick={() => void load(routeId)}
@@ -2880,12 +2982,10 @@ function IssueList({
 
 function CityStoryCatalogWorkspace({
   cities,
-  routes,
   request,
   setNotice,
 }: {
   cities: City[];
-  routes: Route[];
   request: <T>(p: string, i?: RequestInit) => Promise<T>;
   setNotice: (x: string) => void;
 }) {
@@ -2893,8 +2993,6 @@ function CityStoryCatalogWorkspace({
   const [selectedId, setSelectedId] = useState("");
   const [homeCityId, setHomeCityId] = useState(cities[0]?.id || "");
   const [homePreview, setHomePreview] = useState<Data | null>(null);
-  const [routeId, setRouteId] = useState(routes[0]?.id || "");
-  const [pretrip, setPretrip] = useState<Data | null>(null);
   const [busy, setBusy] = useState(false);
   const selected = items.find((item) => item.id === selectedId);
 
@@ -2969,44 +3067,6 @@ function CityStoryCatalogWorkspace({
       setHomePreview(await request<Data>(`/cities/${homeCityId}/home-story-preview`));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "首页模块预览失败");
-    }
-  }
-
-  async function loadPretrip(nextRouteId = routeId) {
-    if (!nextRouteId) return;
-    try {
-      setPretrip(await request<Data>(`/routes/${nextRouteId}/pretrip`));
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "出发前内容读取失败");
-    }
-  }
-
-  async function savePretrip(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!routeId) return;
-    try {
-      const form = new FormData(event.currentTarget);
-      const payload = {
-        expected_version: num(pretrip?.version, 0),
-        theme_story_catalog_id:
-          String(form.get("theme_story_catalog_id") || "") || null,
-        story_directions: parseJsonArray(form, "story_directions"),
-        companion_tags: parseTagText(String(form.get("companion_tags") || "")),
-        safety_tips: parseTextLines(form, "safety_tips"),
-        rest_tips: parseTextLines(form, "rest_tips"),
-        accessibility_tips: parseTextLines(form, "accessibility_tips"),
-        weather_tips: parseTextLines(form, "weather_tips"),
-        offline_roles: parseTagText(String(form.get("offline_roles") || "")),
-      };
-      setPretrip(
-        await request<Data>(`/routes/${routeId}/pretrip`, {
-          method: "PUT",
-          body: JSON.stringify(payload),
-        }),
-      );
-      setNotice("出发前内容已保存为草稿");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : "出发前内容保存失败");
     }
   }
 
@@ -3087,35 +3147,6 @@ function CityStoryCatalogWorkspace({
         {homePreview && <pre>{JSON.stringify(homePreview, null, 2)}</pre>}
       </ResourcePanel>
 
-      <ResourcePanel eyebrow="PRE-TRIP" title="旅行前知识与出发提示">
-        <Field label="路线">
-          <select value={routeId} onChange={(event) => { setRouteId(event.target.value); void loadPretrip(event.target.value); }}>
-            <option value="">请选择</option>
-            {routes.map((route) => <option key={route.id} value={route.id}>{route.title}</option>)}
-          </select>
-        </Field>
-        <button onClick={() => void loadPretrip()}>读取配置</button>
-        {pretrip && (
-          <form key={`${routeId}-${str(pretrip.version)}`} onSubmit={savePretrip} className="form-grid">
-            <Field label="主题故事目录 ID"><input name="theme_story_catalog_id" defaultValue={str(pretrip.theme_story_catalog_id)} /></Field>
-            <Field label="故事方向 JSON 数组（顺序仅建议）"><textarea name="story_directions" rows={6} defaultValue={JSON.stringify(pretrip.story_directions || [], null, 2)} /></Field>
-            <Field label="同行标签"><textarea name="companion_tags" rows={2} defaultValue={stringList(pretrip.companion_tags).join("，")} /></Field>
-            <Field label="安全提示（每行一条）"><textarea name="safety_tips" rows={3} defaultValue={stringList(pretrip.safety_tips).join("\n")} /></Field>
-            <Field label="休息提示（每行一条）"><textarea name="rest_tips" rows={3} defaultValue={stringList(pretrip.rest_tips).join("\n")} /></Field>
-            <Field label="无障碍提示（每行一条）"><textarea name="accessibility_tips" rows={3} defaultValue={stringList(pretrip.accessibility_tips).join("\n")} /></Field>
-            <Field label="天气适应提示（编辑内容，不是实时天气）"><textarea name="weather_tips" rows={3} defaultValue={stringList(pretrip.weather_tips).join("\n")} /></Field>
-            <Field label="可离线准备的变体角色"><input name="offline_roles" defaultValue={stringList(pretrip.offline_roles).join("，")} placeholder="short_preview，on_site_complete" /></Field>
-            <div className="import-actions">
-              <button className="primary-button">保存草稿</button>
-              {pretrip.status === "published" ? (
-                <button type="button" onClick={async () => { await request(`/routes/${routeId}/pretrip/withdraw`, { method: "POST" }); await loadPretrip(); }}>撤回</button>
-              ) : (
-                <button type="button" onClick={async () => { await request(`/routes/${routeId}/pretrip/publish`, { method: "POST" }); await loadPretrip(); }}>发布</button>
-              )}
-            </div>
-          </form>
-        )}
-      </ResourcePanel>
     </div>
   );
 }
@@ -3126,13 +3157,6 @@ function parseJsonArray(form: FormData, field: string): Data[] {
   const parsed: unknown = JSON.parse(raw);
   if (!Array.isArray(parsed)) throw new Error(`${field} 必须是 JSON 数组`);
   return parsed as Data[];
-}
-
-function parseTextLines(form: FormData, field: string): string[] {
-  return String(form.get(field) || "")
-    .split("\n")
-    .map((item) => item.trim())
-    .filter(Boolean);
 }
 
 function ImportView({
