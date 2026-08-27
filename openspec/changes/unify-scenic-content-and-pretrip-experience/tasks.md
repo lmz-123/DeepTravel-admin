@@ -19,7 +19,7 @@
 - [ ] 3.4 Add save/discard/cancel protection for scenic switches, navigation, refresh, and close; retain failed input and verify no hidden section silently loses changes.
 - [ ] 3.5 Embed concise pre-departure text/audio/lifecycle/compact preview in the selected scenic workspace, remove the active standalone pretrip panel, and test text-change audio invalidation and per-scenic isolation.
 - [x] 3.6 Reduce each legacy stop or managed fragment to one normal card with title, story copy, address/location/radius and tags; preserve hidden technical graph values and move narration generation to one scenic-level compact control.
-- [ ] 3.7 Move pre-departure into the first content card below scenic narration/copy, include it in missing/stale coverage and batch regeneration, and test absent/current/stale text plus combined result counts.
+- [x] 3.7 Move pre-departure into the first content card below scenic narration/copy, include it in missing/stale coverage and batch regeneration, and test absent/current/stale text plus combined result counts.
 
 ## 4. Unified city-story administration
 
@@ -27,7 +27,7 @@
 - [x] 4.2 Build a city-card-first “城市故事” workspace whose only business inputs are fixed city, title and story content; remove directory/type/source/metadata/JSON configuration while the API automatically resolves or preserves compatibility metadata.
 - [x] 4.3 Remove “首页听故事” from active navigation and redirect supported old state/bookmarks to the mapped unified item; verify no duplicate save/publish path or media upload remains.
 - [x] 4.4 Add component/API tests proving minimal edits update the same canonical story identity, stale audio rules still apply, hidden compatibility metadata round-trips, and creation fails atomically when a city has no eligible canonical story.
-- [ ] 4.5 Add a save-and-generate city-story narration action that binds the current canonical track/variant without exposing technical inputs, test regeneration and lifecycle approval, and seed one reviewed educational Shenzhen catalog story through the supported API.
+- [x] 4.5 Add a save-and-generate city-story narration action that binds the current canonical track/variant without exposing technical inputs, test regeneration and lifecycle approval, and seed one reviewed educational Shenzhen catalog story through the supported API.
 
 ## 5. Hierarchical and truthful media library
 
