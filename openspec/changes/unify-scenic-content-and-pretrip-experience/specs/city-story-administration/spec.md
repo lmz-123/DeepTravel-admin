@@ -43,3 +43,14 @@ The API SHALL preserve existing placement, variant, source and lifecycle metadat
 #### Scenario: No canonical story is available
 - **WHEN** the operator adds a story in a city whose scenic stories are all already mapped or absent
 - **THEN** creation fails with a clear instruction to add scenic content first and no partial catalog record is written
+
+### Requirement: City-story narration is generated from the minimal editor
+The city-story editor SHALL provide one “生成故事语音” action without exposing source, variant, track, or provider metadata. Activating it SHALL first save the current title and story content, synthesize the canonical complete-story transcript with the default published voice, store the audio in public OSS, and bind the matching current track to the same catalog identity. A changed transcript SHALL make the former track stale until this action is run again.
+
+#### Scenario: Operator generates a new story narration
+- **WHEN** an operator enters a title and story body and activates “生成故事语音”
+- **THEN** the story is saved, one matching canonical narration track is generated and bound, and the editor reports the current audio state
+
+#### Scenario: Operator regenerates after editing copy
+- **WHEN** the saved story body differs from the previously generated transcript
+- **THEN** generation creates or updates the track for the new transcript revision without copying the story body or leaving the catalog variant bound to stale audio

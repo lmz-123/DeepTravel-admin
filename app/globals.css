@@ -177,6 +177,10 @@ h2 { font-size: 21px; }
 .node-section-heading p:last-child, .city-story-heading p:last-child { margin: 7px 0 0; color: var(--muted); font-size: 11px; }
 .node-section-heading > span { color: var(--muted); font-size: 11px; }
 .scenic-node-card { display: grid; gap: 13px; border-left: 3px solid #b69259; }
+.predeparture-card { border-left-color: #78937f; background: linear-gradient(135deg, #fff, #f5f7f2); }
+.predeparture-audio-state, .city-story-audio-state { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 13px; border: 1px solid #d9dfd5; border-radius: 8px; background: #f3f7f2; }
+.predeparture-audio-state strong, .city-story-audio-state strong { color: var(--forest); font-size: 11px; }
+.predeparture-audio-state span, .city-story-audio-state span { color: var(--muted); font-size: 10px; text-align: right; }
 .scenic-node-title { display: flex; align-items: center; gap: 10px; padding-bottom: 12px; border-bottom: 1px solid var(--line); }
 .scenic-node-title > span { color: var(--gold); font: 18px Georgia, serif; }
 .scenic-node-title > small { margin-left: auto; color: var(--muted); }

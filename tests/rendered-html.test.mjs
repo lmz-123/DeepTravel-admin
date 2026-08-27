@@ -56,7 +56,7 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.doesNotMatch(admin, /\["stories"[^\]]*"首页听故事"/);
   assert.match(admin, /aria-label="选择景点"/);
   assert.match(admin, /\/media\/hierarchy/);
-  assert.match(admin, /pretrip\/audio/);
+  assert.doesNotMatch(admin, /<form[^>]+inline-upload[^>]+pretrip\/audio/);
   assert.match(admin, /\/multi-city-import\/preview/);
   assert.match(admin, /确认写入草稿区/);
   assert.match(admin, /\/fragmented-routes\/import/);
@@ -66,7 +66,7 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.match(admin, /已审核 · 未发布/);
   assert.match(admin, /credentials_configured/);
   assert.match(admin, /景点语音/);
-  assert.match(admin, /一次生成这个景点的全部节点/);
+  assert.match(admin, /一次生成出发前和后续全部节点/);
   assert.match(admin, /routes\/\$\{routeId\}\/narration\/generate/);
   assert.match(admin, /\/narration\/config/);
   assert.match(admin, /\/narration\/profiles/);
@@ -76,6 +76,9 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.match(admin, /story_content/);
   assert.match(admin, /city-story-city-card/);
   assert.match(admin, /这里只配置标题和故事内容/);
+  assert.match(admin, /生成故事语音/);
+  assert.match(admin, /story-catalog\/\$\{saved.id\}\/narration\/generate/);
+  assert.match(admin, /保存后使用上方景点语音按钮统一生成/);
   assert.match(admin, /体验标签/);
   assert.match(admin, /规范化标签预览/);
   assert.match(admin, /experience_tags/);

@@ -1139,6 +1139,81 @@ class FragmentedContentApiTests(unittest.TestCase):
                 all("/route-batch-voice/" in row.media_path for row in tracks)
             )
 
+    def test_route_batch_includes_predeparture_and_regenerates_stale_intro(self):
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
+        )
+        self.assertEqual(imported.status_code, 201, imported.text)
+        saved_intro = self.client.put(
+            "/api/admin/routes/route-test/pretrip",
+            headers=self.headers,
+            json={
+                "expected_version": 0,
+                "introduction_text": "出发前，先认识这座城市如何读懂自己的过去。",
+                "introduction_script_version": "intro-v1",
+            },
+        )
+        self.assertEqual(saved_intro.status_code, 200, saved_intro.text)
+        profile = self.client.post(
+            "/api/admin/narration/profiles",
+            headers=self.headers,
+            json={
+                "slug": "whole-scenic-voice",
+                "display_name": "景点整体育音色",
+                "voice_id": "voice-whole-scenic",
+            },
+        ).json()
+        coverage = self.client.get(
+            f"/api/admin/routes/route-test/narration/coverage?profile_id={profile['id']}",
+            headers=self.headers,
+        ).json()
+        self.assertEqual(coverage["total"], 3)
+        self.assertEqual(coverage["missing"][0]["id"], "predeparture")
+
+        generated = self.client.post(
+            "/api/admin/routes/route-test/narration/generate",
+            headers=self.headers,
+            json={"profile_id": profile["id"], "regenerate_all": True},
+        )
+        self.assertEqual(generated.status_code, 201, generated.text)
+        body = generated.json()
+        self.assertEqual(body["generated_count"], 3)
+        self.assertTrue(body["coverage"]["predeparture"]["complete"])
+        self.assertEqual(
+            {item["content_kind"] for item in body["results"]},
+            {"predeparture", "fragment"},
+        )
+        current_intro = self.client.get(
+            "/api/admin/routes/route-test/pretrip", headers=self.headers
+        ).json()
+        self.assertIsNotNone(current_intro["selected_intro_track_id"])
+
+        changed_intro = self.client.put(
+            "/api/admin/routes/route-test/pretrip",
+            headers=self.headers,
+            json={
+                "expected_version": current_intro["version"],
+                "introduction_text": "出发前，换一个角度理解这座城市留下的时间线索。",
+                "introduction_script_version": "intro-v2",
+            },
+        )
+        self.assertEqual(changed_intro.status_code, 200, changed_intro.text)
+        stale = self.client.get(
+            f"/api/admin/routes/route-test/narration/coverage?profile_id={profile['id']}",
+            headers=self.headers,
+        ).json()
+        self.assertEqual(stale["stale"][0]["id"], "predeparture")
+        retried = self.client.post(
+            "/api/admin/routes/route-test/narration/generate",
+            headers=self.headers,
+            json={"profile_id": profile["id"]},
+        )
+        self.assertEqual(retried.status_code, 201, retried.text)
+        self.assertEqual(retried.json()["generated_count"], 1)
+        self.assertEqual(retried.json()["skipped_count"], 2)
+
     def test_same_checksum_assets_share_object_without_unsafe_deletion(self):
         first = self.client.post(
             "/api/admin/media",
@@ -1411,6 +1486,58 @@ class FragmentedContentApiTests(unittest.TestCase):
         self.assertEqual(duplicate.status_code, 409, duplicate.text)
         listed = self.client.get("/api/admin/story-catalog", headers=self.headers)
         self.assertEqual(len(listed.json()), 1)
+
+    def test_minimal_city_story_can_generate_bind_review_and_publish_audio(self):
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
+        )
+        self.assertEqual(imported.status_code, 201, imported.text)
+        created = self.client.post(
+            "/api/admin/story-catalog",
+            headers=self.headers,
+            json={
+                "city_id": "city-test",
+                "title": "一座城市如何留下知识",
+                "story_content": "城市不只由建筑组成，也由人们如何保存、解释和分享记忆组成。",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        item_id = created.json()["id"]
+
+        generated = self.client.post(
+            f"/api/admin/story-catalog/{item_id}/narration/generate",
+            headers=self.headers,
+            json={},
+        )
+        self.assertEqual(generated.status_code, 201, generated.text)
+        generated_body = generated.json()
+        self.assertEqual(len(generated_body["variants"]), 1)
+        self.assertEqual(generated_body["variants"][0]["track_kind"], "story")
+        self.assertFalse(generated_body["variants"][0]["stale"])
+
+        submitted = self.client.post(
+            f"/api/admin/story-catalog/{item_id}/submit-review",
+            headers=self.headers,
+        )
+        self.assertEqual(submitted.status_code, 200, submitted.text)
+        verified = self.client.post(
+            f"/api/admin/story-catalog/{item_id}/verify", headers=self.headers
+        )
+        self.assertEqual(verified.status_code, 200, verified.text)
+        self.assertTrue(verified.json()["ready_to_publish"], verified.text)
+        published = self.client.post(
+            f"/api/admin/story-catalog/{item_id}/publish", headers=self.headers
+        )
+        self.assertEqual(published.status_code, 200, published.text)
+        self.assertEqual(published.json()["status"], "published")
+        with main.SessionLocal() as db:
+            track = db.get(
+                main.StoryNarrationTrack,
+                published.json()["variants"][0]["track_id"],
+            )
+            self.assertEqual(track.status, "published")
 
     def test_multi_city_import_requires_preview_then_writes_draft_atomically(self):
         package = {

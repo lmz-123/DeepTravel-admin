@@ -1497,7 +1497,6 @@ function ScenicContentWorkspace({
         </div>
       )}
       {selected && <>
-        <PredepartureEditor key={`pretrip-${routeId}`} route={selected} request={request} setNotice={setNotice} />
         <ScenicNodesWorkspace
           key={`nodes-${routeId}`}
           route={selected}
@@ -1512,41 +1511,37 @@ function ScenicContentWorkspace({
   );
 }
 
-function PredepartureEditor({ route, request, setNotice }: { route: Route; request: <T>(p: string, i?: RequestInit) => Promise<T>; setNotice: (x: string) => void }) {
+function PredepartureEditor({ route, request, setNotice, refreshToken, onChanged }: { route: Route; request: <T>(p: string, i?: RequestInit) => Promise<T>; setNotice: (x: string) => void; refreshToken: number; onChanged: () => void }) {
   const [pretrip, setPretrip] = useState<Data | null>(null);
-  const [profiles, setProfiles] = useState<NarrationProfileView[]>([]);
   const load = useCallback(async () => {
+    void refreshToken;
     try {
-      const [content, voiceProfiles] = await Promise.all([request<Data>(`/routes/${route.id}/pretrip`), request<NarrationProfileView[]>("/narration/profiles")]);
-      setPretrip(content); setProfiles(voiceProfiles);
+      setPretrip(await request<Data>(`/routes/${route.id}/pretrip`));
     } catch (error) { setNotice(error instanceof Error ? error.message : "出发前内容读取失败"); }
-  }, [request, route.id, setNotice]);
+  }, [request, route.id, setNotice, refreshToken]);
   useEffect(() => { const timer = window.setTimeout(() => void load(), 0); return () => window.clearTimeout(timer); }, [load]);
   async function save(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     try {
-      setPretrip(await request<Data>(`/routes/${route.id}/pretrip`, { method: "PUT", body: JSON.stringify({ expected_version: num(pretrip?.version, 0), introduction_text: String(form.get("introduction_text") || ""), introduction_script_version: str(pretrip?.introduction_script_version) || "1", selected_intro_track_id: String(form.get("selected_intro_track_id") || "") || null }) }));
+      setPretrip(await request<Data>(`/routes/${route.id}/pretrip`, { method: "PUT", body: JSON.stringify({ expected_version: num(pretrip?.version, 0), introduction_text: String(form.get("introduction_text") || ""), introduction_script_version: str(pretrip?.introduction_script_version) || "1", selected_intro_track_id: str(pretrip?.selected_intro_track_id) || null }) }));
+      onChanged();
       setNotice("出发前内容已保存");
     } catch (error) { setNotice(error instanceof Error ? error.message : "出发前内容保存失败"); }
   }
-  async function upload(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    try { await request(`/routes/${route.id}/pretrip/audio`, { method: "POST", body: new FormData(event.currentTarget) }); await load(); setNotice("出发前音频已上传 OSS 并通过审核"); }
-    catch (error) { setNotice(error instanceof Error ? error.message : "音频上传失败"); }
-  }
   async function transition(action: string) { try { await request(`/routes/${route.id}/pretrip/${action}`, { method: "POST" }); await load(); setNotice(action === "publish" ? "出发前内容已发布" : "出发前内容已撤回"); } catch (error) { setNotice(error instanceof Error ? error.message : "状态更新失败"); } }
-  return <ResourcePanel eyebrow="PRE-DEPARTURE" title="出发前介绍与语音">
-    {!pretrip ? <p>正在读取…</p> : <>
-      <form className="form-grid" onSubmit={save}>
-        <Field label="简短介绍"><textarea name="introduction_text" rows={6} maxLength={1200} defaultValue={str(pretrip.introduction_text)} required /></Field>
-        <Field label="匹配的已审核语音"><select name="selected_intro_track_id" defaultValue={str(pretrip.selected_intro_track_id)}><option value="">尚未选择</option>{(pretrip.tracks as Data[] || []).filter((track) => track.matches_current_text && track.status === "published").map((track) => <option key={str(track.id)} value={str(track.id)}>{str(track.profile_id)} · {Math.round(num(track.duration_ms) / 1000)} 秒</option>)}</select></Field>
-        <div className="import-actions"><button className="primary-button">保存</button>{pretrip.status === "published" ? <button type="button" onClick={() => void transition("withdraw")}>撤回</button> : <button type="button" onClick={() => void transition("publish")}>发布</button>}</div>
-      </form>
-      <form className="inline-upload" onSubmit={upload}><input name="file" type="file" accept="audio/*" required /><select name="profile_id" required><option value="">选择音色</option>{profiles.filter((profile) => profile.status === "published").map((profile) => <option key={profile.id} value={profile.id}>{profile.display_name}</option>)}</select><button>上传至公共 OSS</button></form>
-      <p className="muted">客户端只显示紧凑播放图标；修改文字会立即使旧音频失效。</p>
-    </>}
-  </ResourcePanel>;
+  const matchingTrack = ((pretrip?.tracks as Data[]) || []).find((track) => track.matches_current_text && track.status === "published");
+  return !pretrip ? <article className="panel scenic-node-card"><p>正在读取出发前内容…</p></article> : (
+    <form className="panel scenic-node-card predeparture-card" onSubmit={save}>
+      <div className="scenic-node-title"><span>00</span><strong>出发前</strong><small>{storyStatusLabel(str(pretrip.status))}</small></div>
+      <Field label="出发前文案"><textarea name="introduction_text" rows={7} maxLength={1200} defaultValue={str(pretrip.introduction_text)} required /></Field>
+      <div className="predeparture-audio-state"><strong>{matchingTrack ? "语音已生成" : "语音待生成"}</strong><span>{matchingTrack ? `${Math.round(num(matchingTrack.duration_ms, 0) / 1000)} 秒 · 与当前文案匹配` : "保存后使用上方景点语音按钮统一生成"}</span></div>
+      <div className="scenic-node-actions">
+        {pretrip.status === "published" ? <button type="button" className="ghost-button" onClick={() => void transition("withdraw")}>撤回</button> : <button type="button" className="ghost-button" disabled={!matchingTrack} onClick={() => void transition("publish")}>发布</button>}
+        <button className="primary-button">保存出发前</button>
+      </div>
+    </form>
+  );
 }
 
 function ScenicNodesWorkspace({
@@ -1567,6 +1562,7 @@ function ScenicNodesWorkspace({
   const [graph, setGraph] = useState<RouteGraph | null>(null);
   const [busy, setBusy] = useState(false);
   const [validation, setValidation] = useState<GraphValidation | null>(null);
+  const [audioRevision, setAudioRevision] = useState(0);
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -1714,8 +1710,8 @@ function ScenicNodesWorkspace({
 
   return (
     <section className="scenic-node-workspace">
-      {graph?.story_arc && (
-        <CompactNarrationPanel routeId={route.id} request={request} setNotice={setNotice} />
+      {graph && (
+        <CompactNarrationPanel routeId={route.id} request={request} setNotice={setNotice} refreshToken={audioRevision} onNarrationChanged={() => setAudioRevision((value) => value + 1)} />
       )}
       <article className="panel node-section-heading">
         <div>
@@ -1726,6 +1722,7 @@ function ScenicNodesWorkspace({
         <span>{(graph?.fragments.length || 0) + legacyStops.length} 个节点</span>
       </article>
       <div className="scenic-node-list">
+        <PredepartureEditor route={route} request={request} setNotice={setNotice} refreshToken={audioRevision} onChanged={() => setAudioRevision((value) => value + 1)} />
         {graph?.fragments.map((fragment, index) => {
           const stop = (fragment.stop as Data | null) || {};
           const region = (fragment.trigger_region as Data | null) || {};
@@ -1775,7 +1772,7 @@ function ScenicNodesWorkspace({
   );
 }
 
-function CompactNarrationPanel({ routeId, request, setNotice }: { routeId: string; request: <T>(p: string, i?: RequestInit) => Promise<T>; setNotice: (x: string) => void }) {
+function CompactNarrationPanel({ routeId, request, setNotice, refreshToken, onNarrationChanged }: { routeId: string; request: <T>(p: string, i?: RequestInit) => Promise<T>; setNotice: (x: string) => void; refreshToken: number; onNarrationChanged: () => void }) {
   const [profiles, setProfiles] = useState<NarrationProfileView[]>([]);
   const [profileId, setProfileId] = useState("");
   const [coverage, setCoverage] = useState<NarrationCoverage | null>(null);
@@ -1797,13 +1794,14 @@ function CompactNarrationPanel({ routeId, request, setNotice }: { routeId: strin
   }, [request, setNotice]);
 
   const loadCoverage = useCallback(async () => {
+    void refreshToken;
     if (!profileId) return setCoverage(null);
     try {
       setCoverage(await request<NarrationCoverage>(`/routes/${routeId}/narration/coverage?profile_id=${encodeURIComponent(profileId)}`));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "语音覆盖读取失败");
     }
-  }, [profileId, request, routeId, setNotice]);
+  }, [profileId, request, routeId, setNotice, refreshToken]);
 
   useEffect(() => { const timer = window.setTimeout(() => void loadProfiles(), 0); return () => window.clearTimeout(timer); }, [loadProfiles]);
   useEffect(() => { const timer = window.setTimeout(() => void loadCoverage(), 0); return () => window.clearTimeout(timer); }, [loadCoverage]);
@@ -1817,7 +1815,8 @@ function CompactNarrationPanel({ routeId, request, setNotice }: { routeId: strin
         body: JSON.stringify({ profile_id: profileId, regenerate_all: regenerateAll }),
       });
       setCoverage(result.coverage);
-      setNotice(result.failed_count ? `已生成 ${result.generated_count} 条，${result.failed_count} 条失败` : `已生成并保存 ${result.generated_count} 条景点语音`);
+      onNarrationChanged();
+      setNotice(result.failed_count ? `已生成 ${result.generated_count} 条，${result.failed_count} 条失败` : `已生成并保存 ${result.generated_count} 条景点内容语音`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "景点语音生成失败");
     } finally {
@@ -1843,9 +1842,9 @@ function CompactNarrationPanel({ routeId, request, setNotice }: { routeId: strin
   const incomplete = (coverage?.missing.length || 0) + (coverage?.stale.length || 0);
   return (
     <article className="panel compact-narration-panel">
-      <div><p className="eyebrow">SCENIC NARRATION</p><h2>景点语音</h2><p>选一个现有音色，一次生成这个景点的全部节点。</p></div>
+      <div><p className="eyebrow">SCENIC NARRATION</p><h2>景点语音</h2><p>选一个现有音色，一次生成出发前和后续全部节点。</p></div>
       <Field label="讲述音色"><select value={profileId} onChange={(event) => setProfileId(event.target.value)}><option value="">暂无音色</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.display_name}</option>)}</select></Field>
-      <div className="compact-narration-status"><strong>{coverage?.complete_count || 0}/{coverage?.total || 0}</strong><span>节点语音已覆盖</span>{incomplete > 0 && <small>还缺或已过期 {incomplete} 条</small>}</div>
+      <div className="compact-narration-status"><strong>{coverage?.complete_count || 0}/{coverage?.total || 0}</strong><span>内容语音已覆盖</span>{incomplete > 0 && <small>还缺或已过期 {incomplete} 条</small>}</div>
       <div className="compact-narration-actions">
         <button className="primary-button" disabled={busy || !configured || !profileId} onClick={() => void generate(incomplete === 0)}>{busy ? "处理中…" : incomplete ? `生成缺失的 ${incomplete} 条` : "重新生成全部语音"}</button>
         {incomplete > 0 && <button className="ghost-button" disabled={busy || !configured} onClick={() => void generate(true)}>重新生成全部</button>}
@@ -3270,6 +3269,7 @@ function CityStoryCatalogWorkspace({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const selectedCity = cities.find((city) => city.id === cityId);
   const selected = items.find((item) => item.id === editingId);
   const cityItems = items.filter((item) => item.city_id === cityId);
@@ -3290,8 +3290,11 @@ function CityStoryCatalogWorkspace({
   async function saveStory(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!cityId) return;
+    const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+    const generateAfterSave = submitter?.value === "generate-audio";
     const form = new FormData(event.currentTarget);
     setBusy(true);
+    setGenerating(generateAfterSave);
     try {
       const saved = await request<StoryCatalogView>(
         selected ? `/story-catalog/${selected.id}` : "/story-catalog",
@@ -3305,14 +3308,21 @@ function CityStoryCatalogWorkspace({
           }),
         },
       );
+      if (generateAfterSave) {
+        await request<StoryCatalogView>(`/story-catalog/${saved.id}/narration/generate`, {
+          method: "POST",
+          body: JSON.stringify({}),
+        });
+      }
       await loadCatalog();
       setEditingId(saved.id);
       setCreating(false);
-      setNotice("城市故事已保存");
+      setNotice(generateAfterSave ? "城市故事已保存，匹配语音已生成到 OSS" : "城市故事已保存");
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : "城市故事保存失败");
+      setNotice(error instanceof Error ? error.message : generateAfterSave ? "故事语音生成失败" : "城市故事保存失败");
     } finally {
       setBusy(false);
+      setGenerating(false);
     }
   }
 
@@ -3366,9 +3376,14 @@ function CityStoryCatalogWorkspace({
             <div><p className="eyebrow">STORY EDITOR</p><h2>{selected ? "编辑故事" : "添加故事"}</h2><small>所属城市：{selectedCity.name}</small></div>
             <Field label="标题"><input name="title" defaultValue={selected?.title || ""} required /></Field>
             <Field label="故事内容"><textarea name="story_content" rows={16} defaultValue={selected?.story_content || str(selected?.source.transcript)} required /></Field>
+            {selected && (() => {
+              const currentTrack = ((selected.source.tracks as Data[]) || []).find((track) => track.transcript_hash === selected.source.canonical_revision);
+              return <div className="city-story-audio-state"><strong>{currentTrack ? "故事语音已生成" : "故事语音待生成"}</strong><span>{currentTrack ? `${storyStatusLabel(str(currentTrack.status))} · ${formatStoryDuration(num(currentTrack.duration_ms, 0))}` : "点击下方按钮，系统会先保存当前文字再生成语音"}</span></div>;
+            })()}
             {selected?.blockers.length ? <div className="story-blockers"><strong>发布前提示</strong><ul>{selected.blockers.map((blocker) => <li key={blocker}>{blocker}</li>)}</ul></div> : null}
             <div className="import-actions">
-              <button className="primary-button" disabled={busy}>{busy ? "保存中…" : "保存故事"}</button>
+              <button className="primary-button" disabled={busy}>{busy && !generating ? "保存中…" : "保存故事"}</button>
+              <button type="submit" name="intent" value="generate-audio" className="ghost-button" disabled={busy}>{generating ? "正在生成语音…" : "生成故事语音"}</button>
               {selected?.status === "draft" && <button type="button" onClick={() => void transition("submit-review")}>提交审核</button>}
               {selected?.status === "in_review" && <button type="button" onClick={() => void transition("verify")}>通过审核</button>}
               {selected?.status === "verified" && <button type="button" disabled={!selected.ready_to_publish} onClick={() => void transition("publish")}>发布</button>}

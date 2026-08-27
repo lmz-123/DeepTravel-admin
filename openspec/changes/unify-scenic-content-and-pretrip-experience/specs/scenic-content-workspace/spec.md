@@ -31,11 +31,15 @@ Each legacy stop or managed fragment SHALL appear in exactly one normal editing 
 - **THEN** saving the minimal card preserves those values unless a dedicated compatibility process changes them
 
 ### Requirement: Narration generation is scenic-level
-The workspace SHALL provide one compact narration control for the selected scenic area: choose an existing voice profile, generate missing or regenerate all node audio, inspect coverage, and publish matching audio. Voice-profile authoring and per-node technical audition controls SHALL NOT clutter node cards.
+The workspace SHALL provide one compact narration control for the selected scenic area: choose an existing voice profile, generate missing or regenerate all content audio, inspect coverage, and publish matching audio. When pre-departure text exists, that coverage and batch operation SHALL include the pre-departure narration together with all later nodes. Voice-profile authoring and per-node technical audition controls SHALL NOT clutter content cards.
 
 #### Scenario: Operator generates narration
 - **WHEN** an operator chooses a voice and generates narration for the selected scenic area
-- **THEN** missing/stale coverage and the batch result are shown without editing every node audio path
+- **THEN** missing/stale pre-departure and node coverage plus the batch result are shown without editing separate audio paths
+
+#### Scenario: Operator regenerates the whole scenic area
+- **WHEN** an operator chooses “重新生成全部语音” for a scenic area with pre-departure text and later nodes
+- **THEN** the system generates matching audio for the pre-departure card and every node in the same batch using the selected voice
 
 ### Requirement: Scenic selection is searchable and city-grouped
 The workspace SHALL label the action “选择景点” and present a searchable selection surface grouped by backend-provided city, with each result showing enough identity to distinguish scenic areas, including title, cover or fallback, lifecycle status, and available content summary. It MUST support keyboard operation, a clear selected state, and restoration of the most recent valid scenic context; it MUST NOT rely on a single long native select list.
@@ -64,7 +68,7 @@ All content sections SHALL read and write against the same selected scenic ID. S
 - **THEN** it is ignored for presentation and cannot populate or save B's form
 
 ### Requirement: Pre-departure is edited within the scenic workspace
-The workspace SHALL include a per-scenic pre-departure section for concise introduction text and its matching reviewed narration, with draft/review/publish state and preview. The standalone pre-departure panel under city stories SHALL be removed from the active administration surface.
+The workspace SHALL render pre-departure as the first normal content card below the scenic narration control and scenic-copy heading, followed by the later scenic nodes. The card SHALL contain concise introduction text, matching narration state, and draft/publish actions; it MUST NOT appear as a separate top-level panel or require a separate generation workflow.
 
 #### Scenario: Operator configures pre-departure
 - **WHEN** an operator writes the introduction and selects or generates narration for the selected scenic area

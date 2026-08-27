@@ -870,6 +870,77 @@ def update_story_catalog(item_id: str, payload: dict[str, Any], _: Auth, db: Db)
     return _catalog_payload(db, item)
 
 
+@app.post("/api/admin/story-catalog/{item_id}/narration/generate", status_code=201)
+def generate_story_catalog_narration(
+    item_id: str, payload: dict[str, Any], _: Auth, db: Db
+):
+    """Generate and bind one canonical city-story track without UI metadata."""
+    require_city_story_schema()
+    item = db.get(StoryCatalogItem, item_id)
+    if item is None:
+        raise HTTPException(404, "城市故事不存在")
+    if item.status == "published":
+        raise HTTPException(409, "已发布故事请先撤回再重新生成语音")
+    if item.source_kind != "story_arc":
+        raise HTTPException(422, "城市故事语音生成仅支持完整故事来源")
+
+    generate_home_story_track(item.source_id, payload, _, db)
+    publication = db.scalar(
+        select(HomeStoryPublication).where(HomeStoryPublication.arc_id == item.source_id)
+    )
+    track = (
+        db.get(StoryNarrationTrack, publication.selected_track_id)
+        if publication and publication.selected_track_id
+        else None
+    )
+    if track is None:
+        raise HTTPException(500, "故事语音已生成但未能绑定当前音轨")
+    source = _source_context(db, item.source_kind, item.source_id)
+    now = datetime.now(UTC)
+    track.status = "approved"
+    track.reviewed_by = "admin-tts"
+    track.reviewed_at = now
+    track.updated_at = now
+    variant = db.scalar(
+        select(StoryCatalogVariant).where(
+            StoryCatalogVariant.catalog_item_id == item.id,
+            StoryCatalogVariant.role == "short_preview",
+        )
+    )
+    if variant is None:
+        variant = StoryCatalogVariant(
+            id=str(uuid4()),
+            catalog_item_id=item.id,
+            role="short_preview",
+            source_kind=item.source_kind,
+            source_id=item.source_id,
+            track_kind="story",
+            track_id=track.id,
+            transcript_hash=source["canonical_revision"],
+            script_version=source["script_version"],
+            status="approved",
+            reviewed_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(variant)
+    else:
+        variant.source_kind = item.source_kind
+        variant.source_id = item.source_id
+        variant.track_kind = "story"
+        variant.track_id = track.id
+        variant.transcript_hash = source["canonical_revision"]
+        variant.script_version = source["script_version"]
+        variant.status = "approved"
+        variant.reviewed_at = now
+        variant.published_at = None
+        variant.updated_at = now
+    item.canonical_revision = source["canonical_revision"]
+    item.updated_at = now
+    db.commit()
+    return _catalog_payload(db, item)
+
+
 @app.post("/api/admin/story-catalog/{item_id}/{action}")
 def transition_story_catalog(item_id: str, action: str, _: Auth, db: Db):
     require_city_story_schema()
@@ -880,6 +951,43 @@ def transition_story_catalog(item_id: str, action: str, _: Auth, db: Db):
     if action == "submit-review":
         item.status = "in_review"
     elif action == "verify":
+        source = (
+            db.get(StoryArc, item.source_id)
+            if item.source_kind == "story_arc"
+            else db.get(StoryFragment, item.source_id)
+        )
+        if source is None:
+            raise HTTPException(422, "规范故事来源不存在")
+        source.review_state = "reviewed"
+        if isinstance(source, StoryArc):
+            source.reviewed_by = "admin"
+            source.reviewed_at = now
+        expected_hash = (
+            story_transcript_hash(source)
+            if isinstance(source, StoryArc)
+            else hashlib.sha256(source.narration_script.strip().encode()).hexdigest()
+        )
+        for variant in db.scalars(
+            select(StoryCatalogVariant).where(
+                StoryCatalogVariant.catalog_item_id == item.id
+            )
+        ):
+            if (
+                variant.transcript_hash != expected_hash
+                or variant.script_version != source.script_version
+            ):
+                raise HTTPException(409, "故事文字已变化，请重新生成匹配语音")
+            variant.status = "approved"
+            variant.reviewed_at = now
+            variant.updated_at = now
+            if variant.track_kind == "story":
+                track = db.get(StoryNarrationTrack, variant.track_id)
+                if track is None or track.transcript_hash != expected_hash:
+                    raise HTTPException(409, "故事语音与当前正文不匹配")
+                track.status = "approved"
+                track.reviewed_by = "admin"
+                track.reviewed_at = now
+                track.updated_at = now
         item.status = "verified"
         item.review_status = "reviewed"
         item.reviewed_at = now
@@ -898,6 +1006,16 @@ def transition_story_catalog(item_id: str, action: str, _: Auth, db: Db):
         ):
             row.status = "published"
             row.published_at = now
+            if row.track_kind == "story":
+                track = db.get(StoryNarrationTrack, row.track_id)
+                if track is not None:
+                    track.status = "published"
+                    track.published_at = now
+                    track.updated_at = now
+            elif row.track_kind == "fragment":
+                track = db.get(FragmentNarrationTrack, row.track_id)
+                if track is not None:
+                    track.published_at = now
         for row in db.scalars(
             select(StoryPlacement).where(StoryPlacement.catalog_item_id == item.id)
         ):
@@ -2309,15 +2427,69 @@ def narration_profile_coverage(
             stale.append({"id": fragment.id, "title": fragment.title})
         else:
             missing.append({"id": fragment.id, "title": fragment.title})
+    guidance = db.get(RoutePretripGuidance, route_id)
+    predeparture_configured = bool(
+        guidance and str(guidance.introduction_text or "").strip()
+    )
+    predeparture_complete = False
+    predeparture_status = "absent"
+    if predeparture_configured and guidance is not None:
+        predeparture_rows = list(
+            db.scalars(
+                select(RoutePredepartureTrack).where(
+                    RoutePredepartureTrack.route_id == route_id,
+                    RoutePredepartureTrack.profile_id == profile_id,
+                )
+            )
+        )
+        current_predeparture = next(
+            (
+                row
+                for row in predeparture_rows
+                if row.transcript_hash == guidance.introduction_transcript_hash
+                and row.script_version == guidance.introduction_script_version
+            ),
+            None,
+        )
+        if current_predeparture is not None:
+            predeparture_complete = True
+            predeparture_status = "complete"
+        elif predeparture_rows:
+            predeparture_status = "stale"
+            stale.insert(
+                0,
+                {
+                    "id": "predeparture",
+                    "title": "出发前介绍",
+                    "kind": "predeparture",
+                },
+            )
+        else:
+            predeparture_status = "missing"
+            missing.insert(
+                0,
+                {
+                    "id": "predeparture",
+                    "title": "出发前介绍",
+                    "kind": "predeparture",
+                },
+            )
+    total = len(fragments) + int(predeparture_configured)
+    complete_count = len(complete) + int(predeparture_complete)
     return {
         "route_id": route_id,
         "profile_id": profile_id,
-        "total": len(fragments),
-        "complete_count": len(complete),
+        "total": total,
+        "complete_count": complete_count,
         "complete_fragment_ids": complete,
+        "predeparture": {
+            "configured": predeparture_configured,
+            "complete": predeparture_complete,
+            "status": predeparture_status,
+        },
         "missing": missing,
         "stale": stale,
-        "ready": bool(fragments) and not missing and not stale,
+        "ready": bool(total) and not missing and not stale,
     }
 
 
@@ -2437,6 +2609,116 @@ def persist_formal_narration_track(
                     "Failed to clean orphaned narration object %s", object_key
                 )
         raise
+
+
+def persist_predeparture_narration_track(
+    db: Session,
+    *,
+    route_id: str,
+    guidance: RoutePretripGuidance,
+    profile: NarrationVoiceProfile,
+    audio: bytes,
+    mime_type: str,
+    provider: str,
+    model: str,
+    request_id: str | None,
+) -> tuple[RoutePredepartureTrack, str, bool]:
+    """Store and select the current pre-departure track in the scenic batch."""
+    transcript = str(guidance.introduction_text or "").strip()
+    transcript_hash = hashlib.sha256(transcript.encode()).hexdigest()
+    audio_hash = hashlib.sha256(audio).hexdigest()
+    version = re.sub(
+        r"[^a-zA-Z0-9._-]", "-", guidance.introduction_script_version or "1"
+    ) or "1"
+    profile_slug = re.sub(r"[^a-z0-9-]", "-", profile.slug.lower()) or "voice"
+    settings_hash = hashlib.sha256(
+        f"{profile.voice_id}|{profile.emotion}|{profile.speed}|{profile.pitch}".encode()
+    ).hexdigest()[:12]
+    object_key = (
+        f"public/predeparture/{route_id}/{profile_slug}/"
+        f"{transcript_hash[:16]}-{version}-{settings_hash}-{audio_hash[:12]}.mp3"
+    )
+    uploaded = False
+    if not public_object_storage.exists(object_key):
+        public_object_storage.put(object_key, audio, mime_type)
+        uploaded = True
+    canonical_url = public_object_storage.public_url(object_key)
+    now = datetime.now(UTC)
+    asset = db.scalar(select(MediaAsset).where(MediaAsset.object_key == object_key))
+    if asset is None:
+        db.add(
+            MediaAsset(
+                key=(
+                    f"predeparture-{route_id[:20]}-{profile.slug[:16]}-"
+                    f"{transcript_hash[:10]}-{audio_hash[:10]}"
+                ),
+                storage_path=object_key,
+                mime_type=mime_type,
+                storage_provider=public_object_storage.provider,
+                object_key=object_key,
+                canonical_url=canonical_url,
+                visibility="public",
+                size_bytes=len(audio),
+                checksum_sha256=audio_hash,
+                metadata_json={"usage": "predeparture", "route_id": route_id},
+                created_at=now,
+                updated_at=now,
+            )
+        )
+    track = db.scalar(
+        select(RoutePredepartureTrack).where(
+            RoutePredepartureTrack.route_id == route_id,
+            RoutePredepartureTrack.profile_id == profile.id,
+            RoutePredepartureTrack.transcript_hash == transcript_hash,
+            RoutePredepartureTrack.script_version
+            == guidance.introduction_script_version,
+        )
+    )
+    if track is None:
+        track = RoutePredepartureTrack(
+            id=str(uuid4()),
+            route_id=route_id,
+            profile_id=profile.id,
+            transcript_hash=transcript_hash,
+            script_version=guidance.introduction_script_version or "1",
+            media_path=canonical_url,
+            mime_type=mime_type,
+            size_bytes=len(audio),
+            duration_ms=max(1000, len(transcript) * 230),
+            checksum_sha256=audio_hash,
+            generation_metadata_json={},
+            status="published",
+            reviewed_at=now,
+            published_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        db.add(track)
+        db.flush()
+    track.media_path = canonical_url
+    track.mime_type = mime_type
+    track.size_bytes = len(audio)
+    track.duration_ms = max(1000, len(transcript) * 230)
+    track.checksum_sha256 = audio_hash
+    track.generation_metadata_json = {
+        "source": "scenic_batch",
+        "provider": provider,
+        "model": model,
+        "voice_id": profile.voice_id,
+        "emotion": profile.emotion,
+        "speed": profile.speed,
+        "pitch": profile.pitch,
+        "request_id": request_id,
+        "object_key": object_key,
+    }
+    track.status = "published"
+    track.reviewed_at = now
+    track.published_at = now
+    track.updated_at = now
+    guidance.introduction_transcript_hash = transcript_hash
+    guidance.selected_intro_track_id = track.id
+    guidance.updated_at = now
+    return track, object_key, uploaded
 
 
 def story_transcript_hash(arc: StoryArc) -> str:
@@ -2630,8 +2912,16 @@ def generate_home_story_track(arc_id: str, payload: dict[str, Any], _: Auth, db:
     transcript = arc.complete_story.strip()
     if not transcript:
         raise HTTPException(422, "完整故事正文为空")
-    ensure_default_narration_profile(db)
-    profile_id = str(payload.get("profile_id") or DEFAULT_NARRATION_PROFILE_ID)
+    fallback_profile = ensure_default_narration_profile(db)
+    active_default = db.scalar(
+        select(NarrationVoiceProfile).where(
+            NarrationVoiceProfile.is_default.is_(True),
+            NarrationVoiceProfile.status != "archived",
+        )
+    )
+    profile_id = str(
+        payload.get("profile_id") or (active_default or fallback_profile).id
+    )
     profile = db.get(NarrationVoiceProfile, profile_id)
     if profile is None or profile.status == "archived":
         raise HTTPException(404, "音色档案不存在")
@@ -3123,8 +3413,12 @@ def generate_route_narration(route_id: str, payload: dict[str, Any], _: Auth, db
         if arc
         else []
     )
-    if not fragments:
-        raise HTTPException(422, "路线没有可生成的故事节点")
+    guidance = db.get(RoutePretripGuidance, route_id)
+    has_predeparture = bool(
+        guidance and str(guidance.introduction_text or "").strip()
+    )
+    if not fragments and not has_predeparture:
+        raise HTTPException(422, "景点没有可生成的出发前介绍或故事节点")
     coverage_before = narration_profile_coverage(db, route_id, profile.id)
     regenerate_all = bool(payload.get("regenerate_all", False))
     target_ids = (
@@ -3136,6 +3430,11 @@ def generate_route_narration(route_id: str, payload: dict[str, Any], _: Auth, db
     )
     targets = [item for item in fragments if item.id in target_ids]
     skipped = [item for item in fragments if item.id not in target_ids]
+    generate_predeparture = bool(
+        has_predeparture
+        and (regenerate_all or "predeparture" in target_ids)
+    )
+    skip_predeparture = bool(has_predeparture and not generate_predeparture)
 
     def synthesize(fragment: StoryFragment):
         if not fragment.narration_script.strip():
@@ -3165,13 +3464,99 @@ def generate_route_narration(route_id: str, payload: dict[str, Any], _: Auth, db
             generated = list(executor.map(synthesize, targets))
 
     results: list[dict[str, Any]] = [
-        {"fragment_id": item.id, "title": item.title, "status": "skipped"}
+        {
+            "content_id": item.id,
+            "content_kind": "fragment",
+            "fragment_id": item.id,
+            "title": item.title,
+            "status": "skipped",
+        }
         for item in skipped
     ]
+    if skip_predeparture:
+        results.insert(
+            0,
+            {
+                "content_id": "predeparture",
+                "content_kind": "predeparture",
+                "fragment_id": None,
+                "title": "出发前介绍",
+                "status": "skipped",
+            },
+        )
+    if generate_predeparture and guidance is not None:
+        try:
+            synthesis = narration_synthesizer.synthesize(
+                NarrationRequest(
+                    str(guidance.introduction_text or "").strip(),
+                    profile.voice_id,
+                    profile.emotion,
+                    profile.speed,
+                    profile.pitch,
+                )
+            )
+            uploaded_key = None
+            uploaded = False
+            try:
+                track, uploaded_key, uploaded = persist_predeparture_narration_track(
+                    db,
+                    route_id=route_id,
+                    guidance=guidance,
+                    profile=profile,
+                    audio=synthesis.payload,
+                    mime_type=synthesis.mime_type,
+                    provider=synthesis.provider,
+                    model=synthesis.model,
+                    request_id=synthesis.request_id,
+                )
+                db.commit()
+                results.append(
+                    {
+                        "content_id": "predeparture",
+                        "content_kind": "predeparture",
+                        "fragment_id": None,
+                        "title": "出发前介绍",
+                        "status": "saved",
+                        "track_id": track.id,
+                        "media_path": track.media_path,
+                    }
+                )
+            except Exception:
+                db.rollback()
+                if uploaded and uploaded_key:
+                    public_object_storage.delete(uploaded_key)
+                raise
+        except NarrationSynthesisError as error:
+            results.append(
+                {
+                    "content_id": "predeparture",
+                    "content_kind": "predeparture",
+                    "fragment_id": None,
+                    "title": "出发前介绍",
+                    "status": "failed",
+                    "error_code": error.code,
+                }
+            )
+        except Exception:
+            logger.exception(
+                "Scenic narration generation failed for predeparture %s", route_id
+            )
+            results.append(
+                {
+                    "content_id": "predeparture",
+                    "content_kind": "predeparture",
+                    "fragment_id": None,
+                    "title": "出发前介绍",
+                    "status": "failed",
+                    "error_code": "storage_unavailable",
+                }
+            )
     for fragment, synthesis, error_code in generated:
         if synthesis is None:
             results.append(
                 {
+                    "content_id": fragment.id,
+                    "content_kind": "fragment",
                     "fragment_id": fragment.id,
                     "title": fragment.title,
                     "status": "failed",
@@ -3200,6 +3585,8 @@ def generate_route_narration(route_id: str, payload: dict[str, Any], _: Auth, db
             db.commit()
             results.append(
                 {
+                    "content_id": fragment.id,
+                    "content_kind": "fragment",
                     "fragment_id": fragment.id,
                     "title": fragment.title,
                     "status": "saved",
@@ -3216,6 +3603,8 @@ def generate_route_narration(route_id: str, payload: dict[str, Any], _: Auth, db
             )
             results.append(
                 {
+                    "content_id": fragment.id,
+                    "content_kind": "fragment",
                     "fragment_id": fragment.id,
                     "title": fragment.title,
                     "status": "failed",
@@ -3251,14 +3640,14 @@ def generate_route_narration(route_id: str, payload: dict[str, Any], _: Auth, db
         profile.id,
         saved_count,
         failed_count,
-        len(skipped),
+        len(skipped) + int(skip_predeparture),
     )
     return {
         "route_id": route_id,
         "profile": narration_profile_dict(profile),
         "generated_count": saved_count,
         "failed_count": failed_count,
-        "skipped_count": len(skipped),
+        "skipped_count": len(skipped) + int(skip_predeparture),
         "results": results,
         "coverage": coverage,
     }
