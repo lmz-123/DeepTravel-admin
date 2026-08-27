@@ -75,7 +75,9 @@ test("keeps the realtime log surface connected to the independent admin API", as
   assert.match(admin, /保存这个节点/);
   assert.match(admin, /story_content/);
   assert.match(admin, /city-story-city-card/);
-  assert.match(admin, /这里只配置标题和故事内容/);
+  assert.match(admin, /这里只配置标题、封面图和故事内容/);
+  assert.match(admin, /图片会自动转换为 JPEG（质量 85）并保存到公共 OSS/);
+  assert.match(admin, /cover_image: coverImage/);
   assert.match(admin, /生成故事语音/);
   assert.match(admin, /story-catalog\/\$\{saved.id\}\/narration\/generate/);
   assert.match(admin, /保存后使用上方景点语音按钮统一生成/);

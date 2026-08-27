@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 
 _TEMP_DIR = tempfile.TemporaryDirectory()
@@ -35,6 +36,7 @@ from models import (  # noqa: E402
 )
 from narration import NarrationSynthesisError  # noqa: E402
 from object_storage import AlibabaOssObjectStorage  # noqa: E402
+from PIL import Image  # noqa: E402
 from runtime_logs.docker_source import (  # noqa: E402
     DockerFrameDecoder,
     DockerLogSource,
@@ -1249,6 +1251,108 @@ class FragmentedContentApiTests(unittest.TestCase):
         surviving = self.client.get("/api/admin/media", headers=self.headers).json()
         shared_b = next(item for item in surviving if item["key"] == "shared-b")
         self.assertTrue(main.public_object_storage.exists(shared_b["object_key"]))
+
+    def test_image_upload_normalizes_to_progressive_jpeg(self):
+        source = BytesIO()
+        Image.new("RGBA", (32, 20), (30, 90, 120, 180)).save(source, "PNG")
+        response = self.client.post(
+            "/api/admin/media",
+            headers=self.headers,
+            data={"key": "normalized-cover"},
+            files={"file": ("cover.png", source.getvalue(), "image/png")},
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        body = response.json()
+        self.assertEqual(body["mime_type"], "image/jpeg")
+        self.assertTrue(body["object_key"].endswith(".jpg"))
+        with main.public_object_storage.open(body["object_key"]) as stored:
+            normalized = stored.read()
+        self.assertTrue(normalized.startswith(b"\xff\xd8"))
+        with Image.open(BytesIO(normalized)) as image:
+            self.assertEqual(image.format, "JPEG")
+            self.assertEqual(image.size, (32, 20))
+        with main.SessionLocal() as db:
+            asset = db.get(MediaAsset, "normalized-cover")
+            self.assertEqual(asset.metadata_json["jpeg_quality"], 85)
+            self.assertEqual(asset.metadata_json["original_mime_type"], "image/png")
+
+    def test_invalid_image_upload_is_rejected_without_asset(self):
+        response = self.client.post(
+            "/api/admin/media",
+            headers=self.headers,
+            data={"key": "broken-cover"},
+            files={"file": ("broken.png", b"not-an-image", "image/png")},
+        )
+        self.assertEqual(response.status_code, 422, response.text)
+        with main.SessionLocal() as db:
+            self.assertIsNone(db.get(MediaAsset, "broken-cover"))
+
+    def test_image_migration_updates_references_and_retains_original(self):
+        source = BytesIO()
+        Image.new("RGB", (40, 24), (180, 120, 70)).save(source, "PNG")
+        original = source.getvalue()
+        original_key = "public/content/legacy/migration-cover.png"
+        main.public_object_storage.put(original_key, original, "image/png")
+        now = datetime.now(UTC)
+        with main.SessionLocal() as db:
+            db.add(
+                MediaAsset(
+                    key="migration-cover",
+                    storage_path=original_key,
+                    mime_type="image/png",
+                    storage_provider=main.public_object_storage.provider,
+                    object_key=original_key,
+                    canonical_url=main.public_object_storage.public_url(original_key),
+                    visibility="public",
+                    size_bytes=len(original),
+                    checksum_sha256=hashlib.sha256(original).hexdigest(),
+                    metadata_json={"original_filename": "migration-cover.png"},
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            db.add(
+                main.City(
+                    id="migration-city",
+                    slug="migration-city",
+                    name="迁移城",
+                    subtitle="迁移测试",
+                    hero_image=original_key,
+                    latitude=22.5,
+                    longitude=114.0,
+                )
+            )
+            db.commit()
+
+        preview = self.client.post(
+            "/api/admin/media/normalize-images",
+            headers=self.headers,
+            json={"dry_run": True},
+        )
+        self.assertEqual(preview.status_code, 200, preview.text)
+        self.assertEqual(preview.json()["candidate_count"], 1)
+        applied = self.client.post(
+            "/api/admin/media/normalize-images",
+            headers=self.headers,
+            json={"dry_run": False},
+        )
+        self.assertEqual(applied.status_code, 200, applied.text)
+        with main.SessionLocal() as db:
+            asset = db.get(MediaAsset, "migration-cover")
+            city = db.get(main.City, "migration-city")
+            self.assertEqual(asset.mime_type, "image/jpeg")
+            self.assertTrue(asset.object_key.endswith(".jpg"))
+            self.assertEqual(city.hero_image, asset.canonical_url)
+            self.assertEqual(
+                asset.metadata_json["retained_original_object_key"], original_key
+            )
+        self.assertTrue(main.public_object_storage.exists(original_key))
+        repeated = self.client.post(
+            "/api/admin/media/normalize-images",
+            headers=self.headers,
+            json={"dry_run": False},
+        )
+        self.assertEqual(repeated.json()["candidate_count"], 0)
 
     def test_home_story_review_publish_withdraw_and_stale_track_guard(self):
         imported = self.client.post(

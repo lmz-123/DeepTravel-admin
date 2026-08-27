@@ -207,6 +207,13 @@ h2 { font-size: 21px; }
 .city-story-card small { color: var(--muted); }
 .city-story-card p { display: -webkit-box; overflow: hidden; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.6; -webkit-line-clamp: 3; -webkit-box-orient: vertical; }
 .city-story-editor { display: grid; gap: 16px; }
+.city-story-cover-field { display: grid; gap: 9px; }
+.city-story-cover-field .field-label { font-size: 11px; font-weight: 700; }
+.city-story-cover-field > small { color: var(--muted); font-size: 9px; }
+.city-story-cover-preview { aspect-ratio: 3 / 2; display: grid; place-items: center; overflow: hidden; border: 1px dashed #c8c2b3; border-radius: 10px; background: #eeeae1; color: var(--muted); font-size: 11px; }
+.city-story-cover-preview img { width: 100%; height: 100%; object-fit: cover; }
+.city-story-cover-upload { width: fit-content; cursor: pointer; }
+.city-story-cover-upload input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
 .city-story-editor-empty { min-height: 360px; display: grid; place-items: center; align-content: center; gap: 10px; color: var(--muted); }
 .city-story-editor-empty span { width: 52px; height: 52px; display: grid; place-items: center; border: 1px solid #bca878; color: var(--forest); font: 22px Georgia, serif; }
 .inline-upload { display: flex; flex-wrap: wrap; gap: 9px; align-items: center; margin-top: 14px; }

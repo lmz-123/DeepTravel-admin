@@ -9,6 +9,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from io import BytesIO
 from pathlib import Path
 from typing import Annotated, Any
 from uuid import uuid4
@@ -75,6 +76,7 @@ from narration import (
     NarrationSynthesisError,
 )
 from object_storage import AlibabaOssObjectStorage, InMemoryObjectStorage, StoredObject
+from PIL import Image, ImageOps, UnidentifiedImageError
 from pydantic import ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from runtime_logs.docker_source import DockerLogSource
@@ -96,6 +98,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger(__name__)
+Image.MAX_IMAGE_PIXELS = 40_000_000
 
 
 class Settings(BaseSettings):
@@ -536,6 +539,8 @@ def _catalog_payload(db: Session, item: StoryCatalogItem) -> dict[str, Any]:
         blockers.append("目录元数据尚未审核")
     if not item.title.strip() or not source["transcript"].strip():
         blockers.append("标题和故事内容不能为空")
+    if not item.cover_image.strip():
+        blockers.append("封面图不能为空")
     track_map = {track["id"]: track for track in source["tracks"]}
     variant_payloads: list[dict[str, Any]] = []
     durations: list[int] = []
@@ -661,6 +666,29 @@ def _save_catalog_item(
 
     title = str(payload.get("title") or "").strip()
     story_content = str(payload.get("story_content") or "").strip()
+    if "cover_image" in payload:
+        requested_cover = str(payload.get("cover_image") or "").strip()
+        cover_asset = db.scalar(
+            select(MediaAsset).where(
+                or_(
+                    MediaAsset.key == requested_cover,
+                    MediaAsset.storage_path == requested_cover,
+                    MediaAsset.object_key == requested_cover,
+                    MediaAsset.canonical_url == requested_cover,
+                ),
+                MediaAsset.visibility == "public",
+                MediaAsset.storage_provider == public_object_storage.provider,
+                MediaAsset.mime_type.startswith("image/"),
+            )
+        )
+        if not requested_cover or cover_asset is None:
+            raise HTTPException(422, "封面图必须是已上传到公共 OSS 的图片")
+        payload["cover_image"] = (
+            cover_asset.canonical_url
+            or public_object_storage.public_url(
+                cover_asset.object_key or cover_asset.storage_path
+            )
+        )
     if "story_content" in payload:
         if not title or not story_content:
             raise HTTPException(422, "标题和故事内容不能为空")
@@ -2066,6 +2094,168 @@ def media_hierarchy(_: Auth, db: Db):
     }
 
 
+def _normalize_public_image(
+    payload: bytes, original_mime_type: str, original_filename: str
+) -> tuple[bytes, dict[str, Any]]:
+    try:
+        with Image.open(BytesIO(payload)) as source:
+            original_format = source.format or original_mime_type
+            source = ImageOps.exif_transpose(source)
+            source.load()
+            if source.mode in {"RGBA", "LA"} or (
+                source.mode == "P" and "transparency" in source.info
+            ):
+                rgba = source.convert("RGBA")
+                image = Image.new("RGB", rgba.size, (246, 243, 235))
+                image.paste(rgba, mask=rgba.getchannel("A"))
+            else:
+                image = source.convert("RGB")
+            width, height = image.size
+            output = BytesIO()
+            image.save(
+                output,
+                format="JPEG",
+                quality=85,
+                optimize=True,
+                progressive=True,
+            )
+    except (UnidentifiedImageError, OSError, ValueError, Image.DecompressionBombError) as exc:
+        raise HTTPException(422, "图片无法解码，请重新导出后上传") from exc
+    normalized = output.getvalue()
+    return normalized, {
+        "original_filename": original_filename,
+        "original_mime_type": original_mime_type,
+        "original_format": original_format,
+        "original_size_bytes": len(payload),
+        "width": width,
+        "height": height,
+        "normalized_format": "JPEG",
+        "jpeg_quality": 85,
+    }
+
+
+def _media_aliases(item: MediaAsset) -> list[str]:
+    return list(
+        dict.fromkeys(
+            value
+            for value in (
+                item.key,
+                item.storage_path,
+                item.object_key,
+                item.canonical_url,
+            )
+            if value
+        )
+    )
+
+
+def _image_reference_fields():
+    return (
+        (City, City.hero_image),
+        (Route, Route.hero_image),
+        (Stop, Stop.image),
+        (HomeStoryPublication, HomeStoryPublication.cover_image),
+        (StoryCatalogItem, StoryCatalogItem.cover_image),
+    )
+
+
+def _replace_public_image_references(
+    db: Session, aliases: list[str], canonical_url: str
+) -> int:
+    references = 0
+    for model, field in _image_reference_fields():
+        rows = list(db.scalars(select(model).where(field.in_(aliases))))
+        for row in rows:
+            setattr(row, field.key, canonical_url)
+        references += len(rows)
+    return references
+
+
+@app.post("/api/admin/media/normalize-images")
+def normalize_media_images(payload: dict[str, Any], _: Auth, db: Db):
+    dry_run = bool(payload.get("dry_run", True))
+    assets = list(
+        db.scalars(
+            select(MediaAsset)
+            .where(
+                MediaAsset.visibility == "public",
+                MediaAsset.mime_type.startswith("image/"),
+            )
+            .order_by(MediaAsset.created_at, MediaAsset.key)
+        )
+    )
+    candidates = [
+        item
+        for item in assets
+        if item.mime_type != "image/jpeg"
+        or (item.metadata_json or {}).get("jpeg_quality") != 85
+    ]
+    results: list[dict[str, Any]] = []
+    total_before = 0
+    total_after = 0
+    for item in candidates:
+        object_key = item.object_key or item.storage_path
+        try:
+            with public_object_storage.open(object_key) as source:
+                original = source.read()
+        except Exception as exc:
+            db.rollback()
+            raise HTTPException(502, f"无法从 OSS 读取图片：{item.key}") from exc
+        normalized, metadata = _normalize_public_image(
+            original,
+            item.mime_type,
+            str((item.metadata_json or {}).get("original_filename") or item.key),
+        )
+        checksum = hashlib.sha256(normalized).hexdigest()
+        now = datetime.now(UTC)
+        new_object_key = f"public/content/{now:%Y/%m}/{checksum}.jpg"
+        canonical_url = public_object_storage.public_url(new_object_key)
+        aliases = _media_aliases(item)
+        reference_count = sum(
+            db.scalar(select(func.count()).select_from(model).where(field.in_(aliases)))
+            or 0
+            for model, field in _image_reference_fields()
+        )
+        total_before += len(original)
+        total_after += len(normalized)
+        results.append(
+            {
+                "key": item.key,
+                "old_object_key": object_key,
+                "new_object_key": new_object_key,
+                "old_size_bytes": len(original),
+                "new_size_bytes": len(normalized),
+                "reference_count": reference_count,
+            }
+        )
+        if dry_run:
+            continue
+        if not public_object_storage.exists(new_object_key):
+            public_object_storage.put(new_object_key, normalized, "image/jpeg")
+        _replace_public_image_references(db, aliases, canonical_url)
+        item.mime_type = "image/jpeg"
+        item.object_key = new_object_key
+        item.canonical_url = canonical_url
+        item.size_bytes = len(normalized)
+        item.checksum_sha256 = checksum
+        item.metadata_json = {
+            **(item.metadata_json or {}),
+            **metadata,
+            "retained_original_object_key": object_key,
+        }
+        item.updated_at = now
+    if not dry_run:
+        db.commit()
+    return {
+        "dry_run": dry_run,
+        "candidate_count": len(candidates),
+        "total_before_bytes": total_before,
+        "total_after_bytes": total_after,
+        "saved_bytes": total_before - total_after,
+        "assets": results,
+    }
+
+
 @app.post("/api/admin/media", status_code=201)
 def upload_media(
     _: Auth,
@@ -2087,6 +2277,16 @@ def upload_media(
     asset_key = (
         re.sub(r"[^a-zA-Z0-9_-]", "-", key.strip()).strip("-") or Path(safe_name).stem
     )
+    metadata: dict[str, Any] = {"original_filename": safe_name}
+    mime_type = file.content_type
+    suffix = Path(safe_name).suffix.lower()
+    if file.content_type.startswith("image/"):
+        payload, image_metadata = _normalize_public_image(
+            payload, file.content_type, safe_name
+        )
+        metadata.update(image_metadata)
+        mime_type = "image/jpeg"
+        suffix = ".jpg"
     checksum = hashlib.sha256(payload).hexdigest()
     existing = db.get(MediaAsset, asset_key)
     if existing:
@@ -2101,11 +2301,10 @@ def upload_media(
             409, "资源标识已存在；请更换标识，避免已发布内容引用被静默替换"
         )
     now = datetime.now(UTC)
-    suffix = Path(safe_name).suffix.lower()
     object_key = f"public/content/{now:%Y/%m}/{checksum}{suffix}"
     uploaded_now = False
     if not public_object_storage.exists(object_key):
-        stored = public_object_storage.put(object_key, payload, file.content_type)
+        stored = public_object_storage.put(object_key, payload, mime_type)
         uploaded_now = True
     else:
         canonical = public_object_storage.public_url(object_key)
@@ -2114,14 +2313,14 @@ def upload_media(
     item = MediaAsset(
         key=asset_key,
         storage_path=storage_path,
-        mime_type=file.content_type,
+        mime_type=mime_type,
         storage_provider=stored.provider,
         object_key=stored.object_key,
         canonical_url=stored.canonical_url if stored.provider == "oss" else None,
         visibility="public",
         size_bytes=len(payload),
         checksum_sha256=checksum,
-        metadata_json={"original_filename": safe_name},
+        metadata_json=metadata,
         created_at=now,
         updated_at=now,
     )
@@ -2138,6 +2337,9 @@ def upload_media(
         "mime_type": item.mime_type,
         "storage_provider": item.storage_provider,
         "canonical_url": item.canonical_url,
+        "object_key": item.object_key,
+        "size_bytes": item.size_bytes,
+        "checksum_sha256": item.checksum_sha256,
     }
 
 
@@ -2146,12 +2348,13 @@ def delete_media(asset_key: str, _: Auth, db: Db):
     item = db.get(MediaAsset, asset_key)
     if not item:
         raise HTTPException(404, "媒体资源不存在")
+    aliases = _media_aliases(item)
     references = (
         (
             db.scalar(
                 select(func.count())
                 .select_from(City)
-                .where(City.hero_image == item.storage_path)
+                .where(City.hero_image.in_(aliases))
             )
             or 0
         )
@@ -2159,7 +2362,7 @@ def delete_media(asset_key: str, _: Auth, db: Db):
             db.scalar(
                 select(func.count())
                 .select_from(Route)
-                .where(Route.hero_image == item.storage_path)
+                .where(Route.hero_image.in_(aliases))
             )
             or 0
         )
@@ -2169,8 +2372,8 @@ def delete_media(asset_key: str, _: Auth, db: Db):
                 .select_from(Stop)
                 .where(
                     or_(
-                        Stop.image == item.storage_path,
-                        Stop.audio_url == item.storage_path,
+                        Stop.image.in_(aliases),
+                        Stop.audio_url.in_(aliases),
                     )
                 )
             )
@@ -2180,7 +2383,7 @@ def delete_media(asset_key: str, _: Auth, db: Db):
             db.scalar(
                 select(func.count())
                 .select_from(StoryFragment)
-                .where(StoryFragment.audio_path == item.storage_path)
+                .where(StoryFragment.audio_path.in_(aliases))
             )
             or 0
         )
@@ -2188,7 +2391,7 @@ def delete_media(asset_key: str, _: Auth, db: Db):
             db.scalar(
                 select(func.count())
                 .select_from(HomeStoryPublication)
-                .where(HomeStoryPublication.cover_image == item.storage_path)
+                .where(HomeStoryPublication.cover_image.in_(aliases))
             )
             or 0
         )
@@ -2196,7 +2399,15 @@ def delete_media(asset_key: str, _: Auth, db: Db):
             db.scalar(
                 select(func.count())
                 .select_from(StoryNarrationTrack)
-                .where(StoryNarrationTrack.media_path == item.storage_path)
+                .where(StoryNarrationTrack.media_path.in_(aliases))
+            )
+            or 0
+        )
+        + (
+            db.scalar(
+                select(func.count())
+                .select_from(StoryCatalogItem)
+                .where(StoryCatalogItem.cover_image.in_(aliases))
             )
             or 0
         )

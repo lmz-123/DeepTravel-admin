@@ -28,6 +28,7 @@
 - [x] 4.3 Remove “首页听故事” from active navigation and redirect supported old state/bookmarks to the mapped unified item; verify no duplicate save/publish path or media upload remains.
 - [x] 4.4 Add component/API tests proving minimal edits update the same canonical story identity, stale audio rules still apply, hidden compatibility metadata round-trips, and creation fails atomically when a city has no eligible canonical story.
 - [x] 4.5 Add a save-and-generate city-story narration action that binds the current canonical track/variant without exposing technical inputs, test regeneration and lifecycle approval, and seed one reviewed educational Shenzhen catalog story through the supported API.
+- [ ] 4.6 Add a city-story cover upload/preview field backed by the shared media endpoint, preserve it through minimal saves and lifecycle transitions, and assign one generated OSS cover to the published Shenzhen educational story.
 
 ## 5. Hierarchical and truthful media library
 
@@ -36,6 +37,7 @@
 - [ ] 5.3 Add a sanitized OSS/shared-resource readiness endpoint reporting explicit environment, safe public/private bucket identity, CDN base, public/private counts, production/test public/private key-checksum/reference/access agreement, disposable-test-prefix status, local-reference/read/mount blockers, and audit time without credentials, permanent private URLs, raw environment values, or filesystem roots; add redaction and permission tests.
 - [ ] 5.4 Replace the flat media grid with city → scenic expandable browsing, usage filters, shared/unassigned groups, public/private OSS badges, metadata, CDN/protected-access preview/copy/deep-link actions, and accessible loading/empty/error states; add responsive, authorization, and keyboard tests.
 - [ ] 5.5 Make upload and narration copy identify public/private OSS scope, show a blocking warning for missing OSS, canonical drift, unsafe test permissions, local references/reads/mounts, CDN bypass, private exposure, or unknown readiness, and provide migration/recheck guidance without running shell commands in the browser.
+- [ ] 5.6 Normalize accepted editorial image uploads to JPEG quality 85 before checksum/OSS persistence, reject undecodable images atomically, and migrate current public PNG editorial assets plus all known references without deleting rollback objects.
 
 ## 6. Validation, rollout, and independent delivery
 

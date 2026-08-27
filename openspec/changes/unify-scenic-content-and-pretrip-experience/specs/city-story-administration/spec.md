@@ -1,6 +1,6 @@
 ## Purpose
 
-为运营提供唯一且极简的“城市故事”栏目，按城市进入并只维护标题和故事内容，同时复用既有首页故事的 canonical 身份和音轨。
+为运营提供唯一且极简的“城市故事”栏目，按城市进入并只维护标题、封面图和故事内容，同时复用既有首页故事的 canonical 身份和音轨。
 
 ## ADDED Requirements
 
@@ -15,16 +15,20 @@ The CMS SHALL expose one navigation entry named “城市故事” at the curren
 - **WHEN** a supported old administration route or state points to home stories
 - **THEN** the CMS redirects or delegates to the matching item in the unified workspace during the compatibility window
 
-### Requirement: City story has one kind and three business values
-The normal city-story editor SHALL expose only city, title, and story content. City SHALL be fixed by the selected city card. Source kind, source ID, content type, directory item terminology, summary, cover, district, themes, point IDs, fact/review fields, sources, related stories, variants, placements and raw JSON MUST NOT be operator inputs in this workspace. The server SHALL resolve or preserve those compatibility values.
+### Requirement: City story has one kind and four business values
+The normal city-story editor SHALL expose only city, title, cover image, and story content. City SHALL be fixed by the selected city card. Cover SHALL be chosen from or uploaded to the shared public OSS media library and SHALL show an immediate preview. Source kind, source ID, content type, directory item terminology, summary, district, themes, point IDs, fact/review fields, sources, related stories, variants, placements and raw JSON MUST NOT be operator inputs in this workspace. The server SHALL resolve or preserve those compatibility values.
 
 #### Scenario: Operator adds a story
 - **WHEN** the operator opens a city and chooses “添加故事”
-- **THEN** the form asks only for title and story content and creates the single supported city-story kind for that city
+- **THEN** the form asks only for title, cover image, and story content and creates the single supported city-story kind for that city
 
 #### Scenario: Operator edits an existing story
 - **WHEN** the operator opens a story card
-- **THEN** the same title and story content are editable without selecting a directory item or story type
+- **THEN** the same title, cover image, and story content are editable without selecting a directory item or story type
+
+#### Scenario: Operator uploads a story cover
+- **WHEN** the operator selects a local image from the cover field
+- **THEN** the image is normalized to JPEG, uploaded once to public OSS, previewed in the form, and saved as the catalog cover reference
 
 ### Requirement: Existing home stories are reused
 For each eligible existing home-story publication, the CMS SHALL show the same canonical story identity and approved audio through the city-first workspace. Saving or publishing MUST NOT create another transcript body or upload duplicate audio bytes.

@@ -3270,6 +3270,8 @@ function CityStoryCatalogWorkspace({
   const [creating, setCreating] = useState(false);
   const [busy, setBusy] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [coverImage, setCoverImage] = useState("");
+  const [uploadingCover, setUploadingCover] = useState(false);
   const selectedCity = cities.find((city) => city.id === cityId);
   const selected = items.find((item) => item.id === editingId);
   const cityItems = items.filter((item) => item.city_id === cityId);
@@ -3287,12 +3289,34 @@ function CityStoryCatalogWorkspace({
     return () => window.clearTimeout(timer);
   }, [loadCatalog]);
 
+  async function uploadStoryCover(file: File) {
+    if (!cityId) return;
+    const body = new FormData();
+    body.set("file", file);
+    body.set("key", `city-story-cover-${cityId}-${Date.now()}`);
+    setUploadingCover(true);
+    try {
+      const uploaded = await request<Media>("/media", { method: "POST", body });
+      const url = uploaded.canonical_url || uploaded.storage_path;
+      setCoverImage(url);
+      setNotice("封面图已转换为 JPEG 并上传 OSS");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "封面图上传失败");
+    } finally {
+      setUploadingCover(false);
+    }
+  }
+
   async function saveStory(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!cityId) return;
     const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
     const generateAfterSave = submitter?.value === "generate-audio";
     const form = new FormData(event.currentTarget);
+    if (!coverImage) {
+      setNotice("请先上传故事封面图");
+      return;
+    }
     setBusy(true);
     setGenerating(generateAfterSave);
     try {
@@ -3303,6 +3327,7 @@ function CityStoryCatalogWorkspace({
           body: JSON.stringify({
             city_id: cityId,
             title: String(form.get("title") || "").trim(),
+            cover_image: coverImage,
             story_content: String(form.get("story_content") || "").trim(),
             expected_version: selected?.version,
           }),
@@ -3358,13 +3383,13 @@ function CityStoryCatalogWorkspace({
   return (
     <section className="city-story-workspace">
       <article className="panel city-story-heading">
-        <div><button className="text-button" onClick={() => { setCityId(""); setEditingId(null); setCreating(false); }}>← 返回城市</button><p className="eyebrow">CITY STORIES</p><h2>{selectedCity.name} · 城市故事</h2><p>这里只配置标题和故事内容。</p></div>
-        <button className="primary-button" onClick={() => { setEditingId(null); setCreating(true); }}>＋ 添加故事</button>
+        <div><button className="text-button" onClick={() => { setCityId(""); setEditingId(null); setCoverImage(""); setCreating(false); }}>← 返回城市</button><p className="eyebrow">CITY STORIES</p><h2>{selectedCity.name} · 城市故事</h2><p>这里只配置标题、封面图和故事内容。</p></div>
+        <button className="primary-button" onClick={() => { setEditingId(null); setCoverImage(""); setCreating(true); }}>＋ 添加故事</button>
       </article>
       <div className="city-story-layout">
         <div className="city-story-list">
           {cityItems.map((item) => (
-            <button key={item.id} className={item.id === editingId ? "panel city-story-card selected" : "panel city-story-card"} onClick={() => { setEditingId(item.id); setCreating(false); }}>
+            <button key={item.id} className={item.id === editingId ? "panel city-story-card selected" : "panel city-story-card"} onClick={() => { setEditingId(item.id); setCoverImage(item.cover_image || ""); setCreating(false); }}>
               <span><strong>{item.title}</strong><small>{storyStatusLabel(item.status)}</small></span>
               <p>{item.story_content || str(item.source.transcript)}</p>
             </button>
@@ -3375,6 +3400,17 @@ function CityStoryCatalogWorkspace({
           <form key={selected?.id || "new"} className="panel city-story-editor" onSubmit={saveStory}>
             <div><p className="eyebrow">STORY EDITOR</p><h2>{selected ? "编辑故事" : "添加故事"}</h2><small>所属城市：{selectedCity.name}</small></div>
             <Field label="标题"><input name="title" defaultValue={selected?.title || ""} required /></Field>
+            <div className="city-story-cover-field">
+              <span className="field-label">封面图</span>
+              <div className="city-story-cover-preview">
+                {coverImage ? <img src={coverImage} alt="当前故事封面" /> : <span>尚未上传封面图</span>}
+              </div>
+              <label className="ghost-button city-story-cover-upload">
+                {uploadingCover ? "上传中…" : coverImage ? "替换封面图" : "选择封面图"}
+                <input type="file" accept="image/*" disabled={uploadingCover || busy} onChange={(event) => { const file = event.target.files?.[0]; if (file) void uploadStoryCover(file); event.currentTarget.value = ""; }} />
+              </label>
+              <small>图片会自动转换为 JPEG（质量 85）并保存到公共 OSS。</small>
+            </div>
             <Field label="故事内容"><textarea name="story_content" rows={16} defaultValue={selected?.story_content || str(selected?.source.transcript)} required /></Field>
             {selected && (() => {
               const currentTrack = ((selected.source.tracks as Data[]) || []).find((track) => track.transcript_hash === selected.source.canonical_revision);

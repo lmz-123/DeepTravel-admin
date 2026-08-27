@@ -30,6 +30,17 @@ Each media row SHALL display its public/private OSS scope, object key, MIME type
 - **WHEN** an authorized operator inspects user evidence, private community media, or a temporary preview
 - **THEN** the row identifies the private scope and protected access method without rendering a permanent public URL
 
+### Requirement: Public editorial images are normalized to JPEG
+The CMS upload API SHALL decode accepted public editorial image inputs, remove orientation ambiguity, and encode the stored object as JPEG at quality 85 before checksum identity and OSS upload. The resulting media row SHALL use a `.jpg` object key and `image/jpeg` MIME. Audio inputs MUST remain byte-identical, and image payloads that cannot be decoded MUST fail without creating an OSS object or database row.
+
+#### Scenario: Operator uploads a PNG photograph
+- **WHEN** the CMS accepts a valid PNG or JPEG public editorial image
+- **THEN** it stores one JPEG quality-85 OSS object and returns the normalized checksum, size, MIME, and canonical URL
+
+#### Scenario: Existing PNG editorial media is migrated
+- **WHEN** the reviewed production migration converts an existing public PNG image
+- **THEN** a new immutable JPEG object is uploaded, every known content/media reference is updated transactionally, and the old OSS object is retained during rollback observation
+
 ### Requirement: Shared canonical resource status is visible
 The CMS SHALL show that production and test runtimes use the same public bucket, private bucket, object keys, media references, public CDN base, and private-access behavior. It SHALL compare safe public/private bucket identities, object counts, sampled keys/checksums, CDN resolution, and authorized private resolution. It MUST NOT create or encourage environment-specific business-media copies. Disposable integration-test writes SHALL be reported separately and limited to an authorized temporary prefix that cannot overwrite or delete canonical objects.
 
