@@ -34,6 +34,7 @@ from models import (  # noqa: E402
     StoryFragment,
 )
 from narration import NarrationSynthesisError  # noqa: E402
+from object_storage import AlibabaOssObjectStorage  # noqa: E402
 from runtime_logs.docker_source import (  # noqa: E402
     DockerFrameDecoder,
     DockerLogSource,
@@ -1454,7 +1455,9 @@ class FragmentedContentApiTests(unittest.TestCase):
         body = created.json()
         self.assertEqual(body["source_kind"], "story_arc")
         self.assertEqual(body["source_id"], "arc-test")
-        self.assertEqual(body["story_content"], "这是运营人员真正需要编辑的城市故事正文。")
+        self.assertEqual(
+            body["story_content"], "这是运营人员真正需要编辑的城市故事正文。"
+        )
         self.assertEqual(body["content_type"], "城市故事")
         self.assertEqual(len(body["placements"]), 1)
 
@@ -1471,7 +1474,9 @@ class FragmentedContentApiTests(unittest.TestCase):
         self.assertEqual(updated.status_code, 200, updated.text)
         updated_body = updated.json()
         self.assertEqual(updated_body["source_id"], "arc-test")
-        self.assertEqual(updated_body["story_content"], "更新后的正文仍然写回同一个规范故事。")
+        self.assertEqual(
+            updated_body["story_content"], "更新后的正文仍然写回同一个规范故事。"
+        )
         self.assertEqual(len(updated_body["placements"]), 1)
 
         duplicate = self.client.post(
@@ -1623,6 +1628,33 @@ class FragmentedContentApiTests(unittest.TestCase):
         self.assertIn("/entities/routes/0/city_id", paths)
         self.assertIn("/entities/media/0/key", paths)
         self.assertIsNone(response.json()["confirmation_token"])
+
+
+class AlibabaOssObjectStorageTests(unittest.TestCase):
+    def test_exists_treats_wrapped_head_404_as_missing(self):
+        class MissingObject(Exception):
+            status_code = 404
+
+        class OperationFailure(Exception):
+            def unwrap(self):
+                return MissingObject()
+
+        class Client:
+            def head_object(self, request):
+                del request
+                raise OperationFailure()
+
+        class Oss:
+            class HeadObjectRequest:
+                def __init__(self, **kwargs):
+                    self.kwargs = kwargs
+
+        storage = AlibabaOssObjectStorage.__new__(AlibabaOssObjectStorage)
+        storage.client = Client()
+        storage.oss = Oss()
+        storage.bucket = "public-bucket"
+
+        self.assertFalse(storage.exists("public/story.mp3"))
 
 
 class RuntimeLogApiTests(unittest.TestCase):

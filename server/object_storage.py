@@ -140,8 +140,14 @@ class AlibabaOssObjectStorage:
             )
             return True
         except Exception as error:
-            if getattr(error, "status_code", None) == 404:
-                return False
+            current: Exception | None = error
+            visited: set[int] = set()
+            while current is not None and id(current) not in visited:
+                visited.add(id(current))
+                if getattr(current, "status_code", None) == 404:
+                    return False
+                unwrap = getattr(current, "unwrap", None)
+                current = unwrap() if callable(unwrap) else None
             raise
 
     def open(self, object_key: str):
