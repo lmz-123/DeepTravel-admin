@@ -127,8 +127,8 @@ class Settings(BaseSettings):
     client_log_ingest_token: str = "dev-client-logs-change-me"
     client_log_max_request_kb: int = 128
     client_log_max_batch: int = 50
-    client_log_retention_days: int = 7
-    client_log_max_rows: int = 20_000
+    client_log_retention_days: int = 1
+    client_log_max_rows: int = 2_000
     client_log_cleanup_batch: int = 1_000
     backend_logs_enabled: bool = False
     docker_socket_path: str = "/var/run/docker.sock"
@@ -512,6 +512,7 @@ def _source_context(db: Session, source_kind: str, source_id: str) -> dict[str, 
 
 def _catalog_payload(db: Session, item: StoryCatalogItem) -> dict[str, Any]:
     source = _source_context(db, item.source_kind, item.source_id)
+    city = db.get(City, item.city_id)
     variants = list(
         db.scalars(
             select(StoryCatalogVariant)
@@ -533,16 +534,8 @@ def _catalog_payload(db: Session, item: StoryCatalogItem) -> dict[str, Any]:
         blockers.append("规范故事尚未审核")
     if item.review_status != "reviewed":
         blockers.append("目录元数据尚未审核")
-    if (
-        not item.title.strip()
-        or not item.summary.strip()
-        or not item.cover_image.strip()
-    ):
-        blockers.append("标题、简介和封面不能为空")
-    if not item.place_context.strip() or not item.observable_detail.strip():
-        blockers.append("地点背景和可观察细节不能为空")
-    if not item.sources_json:
-        blockers.append("至少需要一个事实来源")
+    if not item.title.strip() or not source["transcript"].strip():
+        blockers.append("标题和故事内容不能为空")
     track_map = {track["id"]: track for track in source["tracks"]}
     variant_payloads: list[dict[str, Any]] = []
     durations: list[int] = []
@@ -584,6 +577,7 @@ def _catalog_payload(db: Session, item: StoryCatalogItem) -> dict[str, Any]:
     return {
         "id": item.id,
         "city_id": item.city_id,
+        "city_name": city.name if city else "",
         "source_kind": item.source_kind,
         "source_id": item.source_id,
         "canonical_revision": item.canonical_revision,
@@ -604,6 +598,7 @@ def _catalog_payload(db: Session, item: StoryCatalogItem) -> dict[str, Any]:
         "status": item.status,
         "version": item.version,
         "source": source,
+        "story_content": source["transcript"],
         "variants": variant_payloads,
         "placements": [
             {
@@ -640,22 +635,75 @@ def _save_catalog_item(
     if forbidden:
         raise HTTPException(422, "目录只引用规范故事，不能复制正文或音频字段")
     now = datetime.now(UTC)
+    if item is not None and item.status == "published":
+        raise HTTPException(409, "已发布故事请先撤回再修改")
+    simple_create = item is None and not payload.get("source_kind") and not payload.get("source_id")
+    city_id = str(payload.get("city_id") or (item.city_id if item else ""))
+    city = db.get(City, city_id)
+    if city is None:
+        raise HTTPException(422, "所属城市不存在")
     source_kind = str(payload.get("source_kind") or (item.source_kind if item else ""))
     source_id = str(payload.get("source_id") or (item.source_id if item else ""))
+    if simple_create:
+        used_sources = select(StoryCatalogItem.source_id).where(
+            StoryCatalogItem.source_kind == "story_arc"
+        )
+        candidate = db.scalar(
+            select(StoryArc)
+            .join(Route, Route.id == StoryArc.route_id)
+            .where(Route.city_id == city_id, ~StoryArc.id.in_(used_sources))
+            .order_by(StoryArc.id)
+        )
+        if candidate is None:
+            raise HTTPException(409, "这个城市没有可添加的景点完整故事，请先在景点内容中添加故事")
+        source_kind = "story_arc"
+        source_id = candidate.id
+
+    title = str(payload.get("title") or "").strip()
+    story_content = str(payload.get("story_content") or "").strip()
+    if "story_content" in payload:
+        if not title or not story_content:
+            raise HTTPException(422, "标题和故事内容不能为空")
+        if source_kind == "story_arc":
+            canonical = db.get(StoryArc, source_id)
+            if canonical is None:
+                raise HTTPException(422, "完整故事来源不存在")
+            transcript_changed = canonical.complete_story.strip() != story_content
+            canonical.title = title
+            canonical.complete_story = story_content
+            if transcript_changed:
+                canonical.review_state = "in_review"
+        elif source_kind == "story_fragment":
+            canonical_fragment = db.get(StoryFragment, source_id)
+            if canonical_fragment is None:
+                raise HTTPException(422, "现场故事来源不存在")
+            transcript_changed = canonical_fragment.narration_script.strip() != story_content
+            canonical_fragment.title = title
+            canonical_fragment.narration_script = story_content
+            canonical_fragment.transcript = story_content
+            if transcript_changed:
+                canonical_fragment.review_state = "in_review"
+        db.flush()
     source = _source_context(db, source_kind, source_id)
     if item is None:
+        route = (
+            db.scalar(select(Route).join(StoryArc, StoryArc.route_id == Route.id).where(StoryArc.id == source_id))
+            if source_kind == "story_arc"
+            else None
+        )
+        fallback_summary = (story_content or source["transcript"]).strip()[:160]
         item = StoryCatalogItem(
             id=str(payload.get("id") or uuid4()),
             source_kind=source_kind,
             source_id=source_id,
             canonical_revision=source["canonical_revision"],
-            city_id=str(payload.get("city_id") or ""),
-            title=str(payload.get("title") or source["title"]),
-            summary=str(payload.get("summary") or ""),
-            cover_image=str(payload.get("cover_image") or ""),
-            content_type=str(payload.get("content_type") or "街角故事"),
-            place_context=str(payload.get("place_context") or ""),
-            observable_detail=str(payload.get("observable_detail") or ""),
+            city_id=city_id,
+            title=title or source["title"],
+            summary=str(payload.get("summary") or fallback_summary),
+            cover_image=str(payload.get("cover_image") or (route.hero_image if route else city.hero_image)),
+            content_type=str(payload.get("content_type") or "城市故事"),
+            place_context=str(payload.get("place_context") or city.name),
+            observable_detail=str(payload.get("observable_detail") or (route.title if route else title or source["title"])),
             status="draft",
             review_status="in_review",
             version=1,
@@ -663,13 +711,17 @@ def _save_catalog_item(
             updated_at=now,
         )
         db.add(item)
-    elif item.status == "published":
-        raise HTTPException(409, "已发布目录请先撤回再修改")
     elif source_kind != item.source_kind or source_id != item.source_id:
         item.source_kind = source_kind
         item.source_id = source_id
         item.canonical_revision = source["canonical_revision"]
         item.review_status = "in_review"
+    if "story_content" in payload:
+        item.title = title
+        item.summary = story_content[:160]
+        item.canonical_revision = source["canonical_revision"]
+        if transcript_changed:
+            item.review_status = "in_review"
     mappings = {
         "city_id": "city_id",
         "title": "title",
@@ -690,11 +742,20 @@ def _save_catalog_item(
     for source_field, target_field in mappings.items():
         if source_field in payload:
             setattr(item, target_field, payload[source_field])
-    if db.get(City, item.city_id) is None:
-        raise HTTPException(422, "所属城市不存在")
+    if simple_create and not item.sources_json:
+        item.sources_json = [{"kind": "canonical_story", "source_id": source_id}]
     item.version += 1 if item.created_at != now else 0
     item.updated_at = now
     db.flush()
+    if simple_create and "variants" not in payload:
+        approved_track = next(
+            (track for track in source["tracks"] if track["status"] in {"approved", "published"}),
+            None,
+        )
+        if approved_track:
+            payload["variants"] = [{"role": "short_preview", "track_id": approved_track["id"]}]
+    if simple_create and "placements" not in payload:
+        payload["placements"] = [{"channel": "home", "module_key": "today_city_story", "display_order": 0}]
     if "variants" in payload:
         db.execute(
             delete(StoryCatalogVariant).where(

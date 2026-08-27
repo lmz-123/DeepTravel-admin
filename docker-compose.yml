@@ -6,6 +6,11 @@ services:
     depends_on:
       admin-api:
         condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   admin-api:
     build: ./server
@@ -35,8 +40,8 @@ services:
       CLIENT_LOG_INGEST_TOKEN: ${CLIENT_LOG_INGEST_TOKEN}
       CLIENT_LOG_MAX_REQUEST_KB: ${CLIENT_LOG_MAX_REQUEST_KB:-128}
       CLIENT_LOG_MAX_BATCH: ${CLIENT_LOG_MAX_BATCH:-50}
-      CLIENT_LOG_RETENTION_DAYS: ${CLIENT_LOG_RETENTION_DAYS:-7}
-      CLIENT_LOG_MAX_ROWS: ${CLIENT_LOG_MAX_ROWS:-20000}
+      CLIENT_LOG_RETENTION_DAYS: ${CLIENT_LOG_RETENTION_DAYS:-1}
+      CLIENT_LOG_MAX_ROWS: ${CLIENT_LOG_MAX_ROWS:-2000}
       CLIENT_LOG_CLEANUP_BATCH: ${CLIENT_LOG_CLEANUP_BATCH:-1000}
       BACKEND_LOGS_ENABLED: ${BACKEND_LOGS_ENABLED:-true}
       DOCKER_SOCKET_PATH: /var/run/docker.sock
@@ -58,3 +63,8 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

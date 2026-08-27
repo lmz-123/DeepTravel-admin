@@ -111,9 +111,9 @@ Content-Type: application/json
 
 ## 安全与保留策略
 
-- 管理日志查询和实时流继续使用 `ADMIN_TOKEN`；客户端只能使用 `CLIENT_LOG_INGEST_TOKEN` 写入。
+- 管理日志查询和实时流继续使用 `ADMIN_TOKEN`；客户端只能使用 `CLIENT_LOG_INGEST_TOKEN` 写入。客户端日志默认仅保留 1 天且最多 2,000 行；Admin 容器日志按 10 MB × 3 个文件轮转，不作为永久日志档案。
 - 服务端会截断超长字段，并脱敏常见 token、密码、Authorization、Cookie 与数据库连接串。
-- 默认客户端日志保留 7 天且最多 20,000 行，写入后执行有上限的清理。
+- 默认客户端日志保留 1 天且最多 2,000 行，写入后执行有上限的清理。
 - Docker socket 即使以 `:ro` 挂载仍是高权限能力。管理服务必须保持私有，不应与不可信代码或公开匿名入口共用。
 - 如不需要后端容器日志，将 `BACKEND_LOGS_ENABLED=false` 并移除 Docker socket volume。
 

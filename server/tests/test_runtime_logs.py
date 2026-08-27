@@ -1358,6 +1358,60 @@ class FragmentedContentApiTests(unittest.TestCase):
         self.assertEqual(len(preview.json()["modules"]), 5)
         self.assertEqual(preview.json()["modules"][0]["items"][0]["id"], item_id)
 
+    def test_minimal_city_story_form_resolves_arc_and_preserves_hidden_metadata(self):
+        imported = self.client.post(
+            "/api/admin/fragmented-routes/import",
+            headers=self.headers,
+            json=self.payload(),
+        )
+        self.assertEqual(imported.status_code, 201, imported.text)
+
+        created = self.client.post(
+            "/api/admin/story-catalog",
+            headers=self.headers,
+            json={
+                "city_id": "city-test",
+                "title": "测试城的一个故事",
+                "story_content": "这是运营人员真正需要编辑的城市故事正文。",
+            },
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        body = created.json()
+        self.assertEqual(body["source_kind"], "story_arc")
+        self.assertEqual(body["source_id"], "arc-test")
+        self.assertEqual(body["story_content"], "这是运营人员真正需要编辑的城市故事正文。")
+        self.assertEqual(body["content_type"], "城市故事")
+        self.assertEqual(len(body["placements"]), 1)
+
+        updated = self.client.put(
+            f"/api/admin/story-catalog/{body['id']}",
+            headers=self.headers,
+            json={
+                "expected_version": body["version"],
+                "city_id": "city-test",
+                "title": "更新后的标题",
+                "story_content": "更新后的正文仍然写回同一个规范故事。",
+            },
+        )
+        self.assertEqual(updated.status_code, 200, updated.text)
+        updated_body = updated.json()
+        self.assertEqual(updated_body["source_id"], "arc-test")
+        self.assertEqual(updated_body["story_content"], "更新后的正文仍然写回同一个规范故事。")
+        self.assertEqual(len(updated_body["placements"]), 1)
+
+        duplicate = self.client.post(
+            "/api/admin/story-catalog",
+            headers=self.headers,
+            json={
+                "city_id": "city-test",
+                "title": "没有第二个来源",
+                "story_content": "不应产生半条数据。",
+            },
+        )
+        self.assertEqual(duplicate.status_code, 409, duplicate.text)
+        listed = self.client.get("/api/admin/story-catalog", headers=self.headers)
+        self.assertEqual(len(listed.json()), 1)
+
     def test_multi_city_import_requires_preview_then_writes_draft_atomically(self):
         package = {
             "schema_version": "1.0",

@@ -89,23 +89,9 @@ def validate_graph(graph: dict[str, Any], media_assets: dict[str, str]) -> dict[
                 "footprint_summary_options_invalid",
                 str(exc),
             )
-        is_publishable = route.get("content_status") == "published" or arc.get(
-            "publication_decision"
-        ) in {"publish", "published"}
-        if not editorial_summary:
-            issue = error if is_publishable else warning
-            issue(
-                f"{path}.footprint_editorial_summary",
-                "footprint_editorial_summary_missing",
-                "缺少足迹页使用的审核概括；旧内容运行时会回退到史实主张",
-            )
-        if not fragment.get("footprint_summary_options"):
-            issue = error if is_publishable else warning
-            issue(
-                f"{path}.footprint_summary_options",
-                "footprint_summary_options_missing",
-                "至少配置一个带稳定 id 的概括选项",
-            )
+        # Footprint summaries are optional compatibility metadata. The runtime
+        # already falls back to the canonical story, so they must not block the
+        # normal scenic copy/location workflow or publication.
         stop = fragment.get("stop")
         if isinstance(stop, dict):
             try:

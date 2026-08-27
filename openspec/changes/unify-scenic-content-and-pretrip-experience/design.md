@@ -9,7 +9,7 @@ The main repository's same-named change owns any additive schema, public project
 **Goals:**
 
 - Make selected scenic area the single explicit UI context without conflating legacy and managed persistence models.
-- Replace raw-ID/JSON-first normal flows with searchable structured controls while retaining advanced escape hatches.
+- Replace raw-ID/JSON-first normal flows with small task-oriented forms; preserve legacy technical values without presenting them as normal required inputs.
 - Expose enough media lineage and provider health for operators to answer where a resource is stored and used.
 - Make OSS-only, complete production/test public/private canonical-resource identity, and delivery boundaries visible and blocking when invalid.
 
@@ -36,19 +36,27 @@ The trigger displays the current scenic cover thumbnail, city/title, lifecycle b
 
 Alternative considered: a styled `<select>` with city optgroups. Rejected because it still cannot show cover, status, content summary, search, or strong selected context at scale.
 
-### 3. Compose forms over existing lifecycle-aware commands
+### 3. Compose minimal node cards over existing lifecycle-aware commands
 
-The merged workspace reuses current route graph, stop, narration, pre-trip, validate, and lifecycle endpoints where their contracts remain correct. The main change adds only missing pre-departure script/track and aggregate summary contracts. Structured editors are the default; advanced JSON remains behind a disclosure and round-trips through the same normalizer. Dirty state is per section, and context switches present save/discard/cancel rather than silently resetting forms.
+The merged workspace reuses current route graph, stop, narration, pre-trip, validate, and lifecycle endpoints where their contracts remain correct. Each stop or fragment is presented as one card with only title, story copy, address/location, ordered tags, and a save action. Scenic-level narration generation is a compact profile selector plus generate/publish actions. Technical graph fields such as safe-preview variants, footprint summaries/options, causal chains, source claims, script versions, and direct audio paths remain server-owned or are round-tripped unchanged instead of being required of operators. Dirty state is per section, and context switches present save/discard/cancel rather than silently resetting forms.
 
 Alternative considered: one giant save payload for every scenic concern. Rejected because a failure would make unrelated sections contend, increase stale-write conflicts, and weaken current locks.
 
-### 4. Merge city-story operations by canonical source identity
+### 4. Use a city-first, single-kind story workspace
 
-The “城市故事” workspace loads unified catalog items after the main migration. A migrated legacy home story opens the same editor with read-only canonical source, structured card metadata, approved variants, city/module placement, blockers, preview, and lifecycle actions. Compatibility links translate legacy arc IDs to the unified catalog ID. The old `HomeStoriesWorkspace` is removed from active navigation only after mapping coverage is complete.
+The “城市故事” workspace first shows cards for every city. Opening one city lists its stories and an add action. The only editable fields are title and story content; city is fixed by the selected card and there is one canonical story kind. The server resolves/preserves canonical source identity, cover, placement and compatibility metadata, so operators never choose a directory item, source kind, content type, variant JSON or placement JSON. A migrated legacy home story opens the same minimal editor and updates the same canonical body. Compatibility links translate legacy arc IDs to the unified catalog ID. The old `HomeStoriesWorkspace` is removed from active navigation only after mapping coverage is complete.
 
 Alternative considered: visually embed both old components in one page. Rejected because it preserves duplicate save/publish commands and contradicts the one-source requirement.
 
-### 5. Build media hierarchy from a server aggregation
+### 5. Remove route/question navigation without deleting compatibility data
+
+The route model remains the internal scenic identity used by graph, journey and narration APIs. Operators create or edit its necessary title, city, description, location summary and cover from the selected scenic workspace; there is no independent route table in navigation. The question page is removed because questions are not part of the current editorial workflow. Existing challenge rows and endpoints remain intact for supported clients and imports.
+
+### 6. Bound all server-side log storage
+
+Client runtime logs stored in MySQL use both a short time window and a hard row limit, enforced at startup and ingestion. Admin containers use Docker `json-file` size/file-count rotation. The log screen remains a recent diagnostic view and is not an archive.
+
+### 7. Build media hierarchy from a server aggregation
 
 The admin API returns paginated city/scenic summary counts and asset details with typed usages from the main schema. The browser does not download all content graphs and infer ownership. Assets remain unique rows; the UI presents multiple usage links for shared assets and a separate unassigned group. Delete checks continue server-side against every reference and publication state.
 
@@ -56,11 +64,11 @@ OSS readiness comes from a sanitized health/audit endpoint containing required-c
 
 Alternative considered: group by object-key folder names. Rejected because current keys are checksum/date/narration oriented and do not reliably encode content ownership.
 
-### 6. Treat any non-OSS or shared-resource mismatch as an operational blocker
+### 8. Treat any non-OSS or shared-resource mismatch as an operational blocker
 
 The CMS reads an explicit non-secret environment label supplied by the server, not the browser hostname. API and admin must both require OSS. Production and test must report identical public/private bucket identities, canonical object keys, media references, CDN base, and private-access behavior; business resources are not environment-prefixed or copied. Optional disposable integration-test mutation is confined to a temporary prefix and cannot overwrite/delete canonical objects. If configuration is missing, identities/checksums drift, any local provider/path/read/mount remains, a public object bypasses CDN, or a private object is publicly exposed, the media page shows a blocking state and disables upload/publication readiness. It provides copyable migration/recheck guidance, but the browser never runs shell migration or receives credentials.
 
-### 7. Preserve service boundaries and failure behavior
+### 9. Preserve service boundaries and failure behavior
 
 - Main repository: Alembic, canonical content/media tables, public API, migration commands.
 - Admin API: authorized aggregation and commands, OSS/shared-resource health, optimistic-version enforcement.

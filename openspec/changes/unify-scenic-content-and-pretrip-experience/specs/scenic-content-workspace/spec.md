@@ -5,7 +5,7 @@
 ## ADDED Requirements
 
 ### Requirement: One scenic-content navigation entry
-The CMS SHALL provide one “景点内容” navigation entry for ordinary stop/story and fragmented-tour administration and SHALL NOT require operators to switch between separate “站点与故事” and “碎片导览” columns to edit one scenic area.
+The CMS SHALL provide one “景点内容” navigation entry for scenic metadata, ordinary stop/story and fragmented-tour administration and SHALL NOT expose independent “路线” or “题目” navigation entries. Route records SHALL remain internal scenic identities for compatible APIs and clients.
 
 #### Scenario: Scenic area contains both content kinds
 - **WHEN** an operator opens a scenic area with legacy stops and managed fragments
@@ -14,6 +14,28 @@ The CMS SHALL provide one “景点内容” navigation entry for ordinary stop/
 #### Scenario: Scenic area contains only one content kind
 - **WHEN** one section has no records
 - **THEN** the workspace shows an actionable empty section without hiding or fabricating the other content kind
+
+#### Scenario: Operator needs scenic metadata
+- **WHEN** the operator edits the selected scenic area's title, description, cover or other necessary route-backed metadata
+- **THEN** the edit opens from “景点内容” without navigating to a route table
+
+### Requirement: Every content node uses one minimal card
+Each legacy stop or managed fragment SHALL appear in exactly one normal editing card. The card SHALL expose only node title, story copy, address/location, arrival radius, and ordered experience tags needed for editorial work. Optional summaries, summary candidates, causal/source/claim fields, script versions, direct audio paths, and other graph implementation details MUST NOT be required or shown in the normal editor, and existing hidden values SHALL round-trip unchanged.
+
+#### Scenario: Operator edits one node
+- **WHEN** the operator changes its copy, location or tags and saves
+- **THEN** that one card persists the change without requiring values in unrelated technical fields
+
+#### Scenario: Legacy technical metadata exists
+- **WHEN** a node already has footprint summaries, causal links, claims or script metadata
+- **THEN** saving the minimal card preserves those values unless a dedicated compatibility process changes them
+
+### Requirement: Narration generation is scenic-level
+The workspace SHALL provide one compact narration control for the selected scenic area: choose an existing voice profile, generate missing or regenerate all node audio, inspect coverage, and publish matching audio. Voice-profile authoring and per-node technical audition controls SHALL NOT clutter node cards.
+
+#### Scenario: Operator generates narration
+- **WHEN** an operator chooses a voice and generates narration for the selected scenic area
+- **THEN** missing/stale coverage and the batch result are shown without editing every node audio path
 
 ### Requirement: Scenic selection is searchable and city-grouped
 The workspace SHALL label the action “选择景点” and present a searchable selection surface grouped by backend-provided city, with each result showing enough identity to distinguish scenic areas, including title, cover or fallback, lifecycle status, and available content summary. It MUST support keyboard operation, a clear selected state, and restoration of the most recent valid scenic context; it MUST NOT rely on a single long native select list.

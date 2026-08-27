@@ -139,14 +139,14 @@ class ScenicTagContractTests(unittest.TestCase):
             {item["path"] for item in result["errors"]},
         )
 
-    def test_old_draft_packages_warn_and_publishable_blank_fields_fail(self):
+    def test_optional_footprint_summaries_do_not_warn_or_block_publication(self):
         draft = validate_graph(
             {"route": {}, "story_arc": {}, "fragments": [{"position": 1}]},
             {},
         )
         warning_paths = {item["path"] for item in draft["warnings"]}
-        self.assertIn("fragments[0].footprint_editorial_summary", warning_paths)
-        self.assertIn("fragments[0].footprint_summary_options", warning_paths)
+        self.assertNotIn("fragments[0].footprint_editorial_summary", warning_paths)
+        self.assertNotIn("fragments[0].footprint_summary_options", warning_paths)
 
         published = validate_graph(
             {
@@ -157,8 +157,8 @@ class ScenicTagContractTests(unittest.TestCase):
             {},
         )
         error_paths = {item["path"] for item in published["errors"]}
-        self.assertIn("fragments[0].footprint_editorial_summary", error_paths)
-        self.assertIn("fragments[0].footprint_summary_options", error_paths)
+        self.assertNotIn("fragments[0].footprint_editorial_summary", error_paths)
+        self.assertNotIn("fragments[0].footprint_summary_options", error_paths)
 
     def test_import_preview_and_persistence_share_footprint_fields(self):
         record = {
