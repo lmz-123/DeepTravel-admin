@@ -277,6 +277,15 @@ const titles: Record<Tab, [string, string]> = {
   import: ["批量导入", "CONTENT IMPORT"],
   logs: ["运行日志", "RUNTIME OBSERVABILITY"],
 };
+const pageNotes: Record<Tab, string> = {
+  dashboard: "把待处理的内容集中在一页，先看状态，再进入编辑。",
+  cities: "管理城市封面、城市信息，以及它下面的路线入口。",
+  scenic: "路线、节点、定位触发和旁白在同一个工作区完成。",
+  catalog: "把城市短篇整理成可被客户端发现和阅读的内容。",
+  media: "所有图片和音频都从这里追踪来源、引用和 OSS 状态。",
+  import: "导入前先预览变更，确认后才写入内容数据库。",
+  logs: "查看客户端与服务端的运行状态，快速定位异常。",
+};
 const emptyDashboard: Dashboard = {
   cities: 0,
   routes: 0,
@@ -289,8 +298,50 @@ const emptyDashboard: Dashboard = {
   recent_routes: [],
 };
 
+function Navigation({
+  active,
+  onSelect,
+}: {
+  active: Tab;
+  onSelect: (tab: Tab) => void;
+}) {
+  return (
+    <nav className="side-nav" aria-label="内容管理">
+      <div className="nav-group">
+        <small className="nav-group-label">工作台</small>
+        {navItems.slice(0, 4).map(([key, number, label]) => (
+          <button
+            className={active === key ? "nav-item active" : "nav-item"}
+            key={key}
+            onClick={() => onSelect(key)}
+            aria-current={active === key ? "page" : undefined}
+          >
+            <span>{number}</span>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="nav-group nav-group-secondary">
+        <small className="nav-group-label">资源与系统</small>
+        {navItems.slice(4).map(([key, number, label]) => (
+          <button
+            className={active === key ? "nav-item active" : "nav-item"}
+            key={key}
+            onClick={() => onSelect(key)}
+            aria-current={active === key ? "page" : undefined}
+          >
+            <span>{number}</span>
+            {label}
+          </button>
+        ))}
+      </div>
+    </nav>
+  );
+}
+
 export default function AdminApp() {
   const [active, setActive] = useState<Tab>("dashboard");
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [apiBase, setApiBase] = useState("");
   const [token, setToken] = useState("");
   const [connected, setConnected] = useState(false);
@@ -390,6 +441,25 @@ export default function AdminApp() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [mobileNavOpen]);
+
+  function navigate(tab: Tab) {
+    setActive(tab);
+    setMobileNavOpen(false);
+  }
+
   async function saveConnection(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -488,18 +558,7 @@ export default function AdminApp() {
             <small>内容中台</small>
           </div>
         </div>
-        <nav className="side-nav" aria-label="内容管理">
-          {navItems.map(([key, number, label]) => (
-            <button
-              className={active === key ? "nav-item active" : "nav-item"}
-              key={key}
-              onClick={() => setActive(key)}
-            >
-              <span>{number}</span>
-              {label}
-            </button>
-          ))}
-        </nav>
+        <Navigation active={active} onSelect={navigate} />
         <button
           className="connection-card"
           onClick={() => setSettingsOpen(true)}
@@ -511,13 +570,49 @@ export default function AdminApp() {
           </span>
         </button>
       </aside>
+      {mobileNavOpen && (
+        <>
+          <button
+            className="mobile-nav-scrim"
+            aria-label="关闭导航菜单"
+            onClick={() => setMobileNavOpen(false)}
+          />
+          <aside className="mobile-nav-drawer" aria-label="移动端内容管理">
+            <div className="mobile-nav-head">
+              <span className="brand-mark">简</span>
+              <strong>内容目录</strong>
+              <button
+                className="close-button"
+                aria-label="关闭导航菜单"
+                onClick={() => setMobileNavOpen(false)}
+              >
+                ×
+              </button>
+            </div>
+            <Navigation active={active} onSelect={navigate} />
+          </aside>
+        </>
+      )}
       <section className="workspace">
         <header className="topbar">
-          <div>
+          <div className="topbar-title">
             <p className="eyebrow">{titles[active][1]}</p>
             <h1>{titles[active][0]}</h1>
+            <p className="topbar-note">{pageNotes[active]}</p>
           </div>
-          <div className="top-actions">
+          <button
+            className="mobile-menu-button"
+            aria-expanded={mobileNavOpen}
+            onClick={() => setMobileNavOpen(true)}
+          >
+            <span aria-hidden="true">☰</span> 内容目录
+          </button>
+          <div className="topbar-right">
+            <span className={connected ? "connection-pill" : "connection-pill offline"}>
+              <i className="status-dot" />
+              {connected ? "数据服务在线" : "等待连接"}
+            </span>
+            <div className="top-actions">
             <button
               className="ghost-button"
               onClick={() => setSettingsOpen(true)}
@@ -558,6 +653,7 @@ export default function AdminApp() {
                 </button>
               </>
             )}
+            </div>
           </div>
         </header>
         {!connected ? (
@@ -685,7 +781,7 @@ function DashboardView({
     <>
       <section className="stats-grid">
         <article className="stat-card feature">
-          <span>已上线城市</span>
+          <span>城市总数</span>
           <strong>{pad(data.cities)}</strong>
           <small>{data.published_routes} 个景点已发布</small>
         </article>
@@ -1445,6 +1541,7 @@ function ScenicContentWorkspace({
   onDeleteStop: (x: Stop) => void;
 }) {
   const [query, setQuery] = useState("");
+  const [cityFilter, setCityFilter] = useState("");
   const [pickerOpen, setPickerOpen] = useState(false);
   const [routeId, setRouteId] = useState("");
   useEffect(() => {
@@ -1456,10 +1553,18 @@ function ScenicContentWorkspace({
     return () => window.clearTimeout(timer);
   }, [routes]);
   const selected = routes.find((route) => route.id === routeId);
-  const filtered = routes.filter((route) =>
-    `${route.city_name || ""} ${route.title} ${route.slug}`.toLowerCase().includes(query.trim().toLowerCase()),
-  );
-  const grouped = filtered.reduce<Record<string, Route[]>>((result, route) => {
+  const cityOptions = Array.from(
+    new Set(routes.map((route) => route.city_name || "未命名城市")),
+  ).sort((a, b) => a.localeCompare(b, "zh-CN"));
+  const filtered = routes.filter((route) => {
+    const haystack = `${route.city_name || ""} ${route.title} ${route.slug}`.toLowerCase();
+    return (
+      (!cityFilter || (route.city_name || "未命名城市") === cityFilter) &&
+      haystack.includes(query.trim().toLowerCase())
+    );
+  });
+  const visibleRoutes = filtered.slice(0, 80);
+  const grouped = visibleRoutes.reduce<Record<string, Route[]>>((result, route) => {
     (result[route.city_name || "未命名城市"] ||= []).push(route);
     return result;
   }, {});
@@ -1488,10 +1593,19 @@ function ScenicContentWorkspace({
         <div className="modal-backdrop">
           <section className="modal scenic-picker" role="dialog" aria-modal="true" aria-label="选择景点">
             <div className="modal-head"><div><p className="eyebrow">SCENIC PICKER</p><h2>选择景点</h2></div><button aria-label="关闭景点选择" onClick={() => setPickerOpen(false)}>×</button></div>
-            <input aria-label="搜索景点" placeholder="搜索城市、景点名称或 slug" value={query} onChange={(event) => setQuery(event.target.value)} />
+            <div className="scenic-picker-controls">
+              <input aria-label="搜索景点" placeholder="搜索城市、景点名称或 slug" value={query} onChange={(event) => setQuery(event.target.value)} />
+              <select aria-label="按城市筛选" value={cityFilter} onChange={(event) => setCityFilter(event.target.value)}>
+                <option value="">全部城市</option>
+                {cityOptions.map((city) => <option key={city} value={city}>{city}</option>)}
+              </select>
+            </div>
+            <p className="scenic-picker-count">
+              {filtered.length ? `找到 ${filtered.length} 条景点${filtered.length > visibleRoutes.length ? `，当前显示前 ${visibleRoutes.length} 条` : ""}` : "没有匹配的景点"}
+            </p>
             <div className="scenic-groups">
               {Object.entries(grouped).map(([city, rows]) => <section key={city}><h3>{city}</h3><div className="scenic-options">{rows.map((route) => <button key={route.id} className={route.id === routeId ? "scenic-option selected" : "scenic-option"} onClick={() => choose(route)}><span className="scenic-cover">{route.hero_image ? <img src={route.hero_image} alt="" /> : route.title.slice(0, 1)}</span><span><strong>{route.title}</strong><small>{route.stop_count} 个站点 · {storyStatusLabel(route.content_status)}</small></span></button>)}</div></section>)}
-              {!filtered.length && <TableEmpty text="没有匹配的景点" />}
+              {!visibleRoutes.length && <TableEmpty text="没有匹配的景点" />}
             </div>
           </section>
         </div>
