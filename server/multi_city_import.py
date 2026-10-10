@@ -27,6 +27,7 @@ from models import (
     StoryPlacement,
 )
 from schemas import CityInput, RouteInput, StopInput
+from city_maps import enqueue, resolve_city
 
 SCHEMA_VERSION = "1.0"
 MAX_PACKAGE_BYTES = 2 * 1024 * 1024
@@ -549,6 +550,10 @@ def _apply_package(db: Session, package: dict[str, Any]) -> dict[str, Any]:
             count += 1
         counts[collection] = count
         db.flush()
+        if collection == "cities":
+            for raw in package[collection]:
+                enqueue(db, db.get(City, str(raw["id"])), raw.get("adcode"))
+            db.flush()
     return {"message": "内容包已写入草稿区", "imported": counts, "replayed": False}
 
 
@@ -557,7 +562,9 @@ def _values(collection: str, raw: dict[str, Any]) -> dict[str, Any]:
     values = dict(raw)
     if collection == "cities":
         identity = values.pop("id")
-        return {"id": identity, **CityInput.model_validate(values).model_dump()}
+        validated = CityInput.model_validate(values)
+        resolve_city(validated.name, validated.adcode)
+        return {"id": identity, **validated.model_dump(exclude={"adcode"})}
     if collection == "routes":
         identity = values.pop("id")
         validated = RouteInput.model_validate(values).model_dump()

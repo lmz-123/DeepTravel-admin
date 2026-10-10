@@ -10,15 +10,17 @@ from content_schema import normalize_experience_tags
 
 
 class CityInput(BaseModel):
+    adcode: str | None = Field(default=None, pattern=r"^[0-9]{6}$")
     slug: str = Field(min_length=1, max_length=80)
     name: str = Field(min_length=1, max_length=80)
     subtitle: str = Field(min_length=1, max_length=160)
     hero_image: str = Field(min_length=1, max_length=255)
-    latitude: float
-    longitude: float
+    latitude: float = Field(ge=-85, le=85, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
 
 
 class RouteInput(BaseModel):
+    map_category: Literal["coast", "nature", "streets", "architecture", "park", "other"] | None = None
     city_id: str
     slug: str = Field(min_length=1, max_length=120)
     title: str = Field(min_length=1, max_length=160)
@@ -40,8 +42,8 @@ class StopInput(BaseModel):
     title: str = Field(min_length=1, max_length=160)
     kicker: str = Field(min_length=1, max_length=120)
     address: str = Field(min_length=1, max_length=255)
-    latitude: float
-    longitude: float
+    latitude: float = Field(ge=-85, le=85, allow_inf_nan=False)
+    longitude: float = Field(ge=-180, le=180, allow_inf_nan=False)
     arrival_radius_m: int = Field(default=80, gt=0)
     story_title: str = Field(min_length=1, max_length=200)
     story_body: str = Field(min_length=1)

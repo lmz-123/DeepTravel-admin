@@ -774,3 +774,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 
 @keyframes drawer-in { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+
+/* City boundaries are prepared in the background; keep the selector bounded. */
+.map-city-choices { display: flex; flex-wrap: wrap; gap: 8px; max-height: 160px; overflow-y: auto; }
+.city-map-state { font-size: 12px; opacity: .75; }

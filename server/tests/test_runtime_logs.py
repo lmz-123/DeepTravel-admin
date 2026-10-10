@@ -274,6 +274,35 @@ class FragmentedContentApiTests(unittest.TestCase):
     def headers(self):
         return {"Authorization": "Bearer admin-test-token"}
 
+    def test_city_selection_queues_maps_and_explicit_category_roundtrips(self):
+        from models import CityMap
+        response = self.client.get("/api/admin/map-cities?q=杭州", headers=self.headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()[0]["adcode"], "330100")
+        self.assertEqual(self.client.get("/api/admin/map-cities").status_code, 401)
+        body = {"slug": "hangzhou-maps", "name": "杭州", "subtitle": "城市",
+                "hero_image": "image.jpg", "latitude": 0, "longitude": 0, "adcode": "330100"}
+        response = self.client.post("/api/admin/cities", json=body, headers=self.headers)
+        self.assertEqual(response.status_code, 201)
+        city = response.json()
+        self.assertGreater(city["latitude"], 20)
+        with main.SessionLocal() as db:
+            self.assertEqual(db.get(CityMap, city["id"]).adcode, "330100")
+        self.assertEqual(self.client.post("/api/admin/cities", json=body, headers=self.headers).status_code, 409)
+        retry = self.client.post(f"/api/admin/cities/{city['id']}/map/retry", headers=self.headers)
+        self.assertEqual(retry.json()["status"], "pending")
+        bad = dict(body, slug="bad-code", adcode="999999")
+        self.assertEqual(self.client.post("/api/admin/cities", json=bad, headers=self.headers).status_code, 422)
+        route = {"city_id": city["id"], "slug": "park-map", "title": "公园", "subtitle": "公园",
+                 "description": "公园", "duration_minutes": 60, "distance_km": 1,
+                 "difficulty": "轻松", "theme": "城市生活", "hero_image": "image.jpg", "map_category": "park"}
+        created = self.client.post("/api/admin/routes", json=route, headers=self.headers)
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.json()["map_category"], "park")
+        route["slug"] = "bad-category"
+        route["map_category"] = "定位音频"
+        self.assertEqual(self.client.post("/api/admin/routes", json=route, headers=self.headers).status_code, 422)
+
     def payload(self):
         version = "test-v1"
         return {

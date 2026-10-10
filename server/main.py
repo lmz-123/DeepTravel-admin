@@ -97,6 +97,9 @@ from sqlalchemy import create_engine, delete, func, inspect, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from city_maps import CityMapWorker, enqueue, map_status, resolve_city, search_cities
+from models import CityMap
+
 logger = logging.getLogger(__name__)
 Image.MAX_IMAGE_PIXELS = 40_000_000
 
@@ -247,7 +250,29 @@ async def lifespan(_: FastAPI):
     ensure_photo_mission_guidance_schema(engine)
     ensure_footprint_content_schema(engine)
     await asyncio.to_thread(run_log_retention)
-    yield
+    worker = CityMapWorker(SessionLocal, public_object_storage)
+
+    async def maps_loop():
+        while True:
+            try:
+                await asyncio.to_thread(worker.reconcile)
+                for _ in range(3):
+                    if not await asyncio.to_thread(worker.run_one):
+                        break
+            except Exception:
+                logger.warning("city_map_worker_retry")
+            await asyncio.sleep(15)
+
+    task = asyncio.create_task(maps_loop()) if not settings.testing else None
+    try:
+        yield
+    finally:
+        if task:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(title="简地内容中台 API", version="1.1.0", lifespan=lifespan)
@@ -321,6 +346,7 @@ def route_dict(
         "distance_km": item.distance_km,
         "difficulty": item.difficulty,
         "theme": item.theme,
+        "map_category": item.map_category,
         "hero_image": item.hero_image,
         "is_featured": item.is_featured,
         "content_status": item.content_status,
@@ -1714,18 +1740,49 @@ def dashboard(_: Auth, db: Db):
     }
 
 
+@app.get("/api/admin/map-cities")
+def map_city_directory(_: Auth, q: str = ""):
+    return search_cities(q)
+
+
+@app.post("/api/admin/cities/{item_id}/map/retry")
+def retry_city_map(item_id: str, _: Auth, db: Db):
+    city = db.get(City, item_id)
+    if city is None:
+        raise HTTPException(404, "城市不存在")
+    current = db.get(CityMap, item_id)
+    row = enqueue(db, city, current.adcode if current else None, force=True)
+    db.commit()
+    return map_status(row)
+
+
 @app.get("/api/admin/cities")
 def list_cities(_: Auth, db: Db, q: str = ""):
     statement = select(City).order_by(City.name)
     if q:
         statement = statement.where(or_(City.name.contains(q), City.slug.contains(q)))
-    return [city_dict(item) for item in db.scalars(statement)]
+    maps = {row.city_id: row for row in db.scalars(select(CityMap))}
+    return [{**city_dict(item), "map": map_status(maps.get(item.id))}
+            for item in db.scalars(statement)]
 
 
 @app.post("/api/admin/cities", status_code=201)
 def create_city(payload: CityInput, _: Auth, db: Db):
-    item = City(id=str(uuid4()), **payload.model_dump())
+    values = payload.model_dump(exclude={"adcode"})
+    try:
+        resolved = resolve_city(payload.name, payload.adcode)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    if resolved:
+        values["latitude"], values["longitude"] = resolved["latitude"], resolved["longitude"]
+    item = City(id=str(uuid4()), **values)
     db.add(item)
+    try:
+        db.flush()
+    except IntegrityError as error:
+        db.rollback()
+        raise HTTPException(409, "城市标识已存在") from error
+    enqueue(db, item, payload.adcode)
     commit_or_conflict(db, "城市标识已存在")
     return city_dict(item)
 
@@ -1735,8 +1792,19 @@ def update_city(item_id: str, payload: CityInput, _: Auth, db: Db):
     item = db.get(City, item_id)
     if not item:
         raise HTTPException(404, "城市不存在")
-    for key, value in payload.model_dump().items():
+    previous = db.get(CityMap, item_id)
+    adcode = payload.adcode if "adcode" in payload.model_fields_set else (
+        previous.adcode if previous and item.name == payload.name else None)
+    try:
+        resolved = resolve_city(payload.name, adcode)
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from error
+    values = payload.model_dump(exclude={"adcode"})
+    if resolved:
+        values["latitude"], values["longitude"] = resolved["latitude"], resolved["longitude"]
+    for key, value in values.items():
         setattr(item, key, value)
+    enqueue(db, item, adcode)
     commit_or_conflict(db, "城市标识已存在")
     return city_dict(item)
 
@@ -4182,7 +4250,9 @@ def import_content(payload: dict[str, Any], _: Auth, db: Db):
                 or db.scalar(select(City.id).where(City.slug == data.slug))
                 or str(uuid4())
             )
-            upsert(db, City, city_id, data.model_dump())
+            upsert(db, City, city_id, data.model_dump(exclude={"adcode"}))
+            db.flush()
+            enqueue(db, db.get(City, city_id), data.adcode)
             city_ids[data.slug] = city_id
             counts["cities"] += 1
 
@@ -4555,6 +4625,10 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
     if _published_route_locked(db, route):
         raise HTTPException(409, "published_route_locked")
     route_data = dict(graph.get("route") or {})
+    if "map_category" in route_data and route_data["map_category"] not in (
+        None, "coast", "nature", "streets", "architecture", "park", "other"
+    ):
+        raise HTTPException(422, "地图分类无效")
     for key in (
         "slug",
         "title",
@@ -4564,6 +4638,7 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
         "distance_km",
         "difficulty",
         "theme",
+        "map_category",
         "hero_image",
         "is_featured",
     ):
@@ -5186,6 +5261,7 @@ def import_fragmented_route(payload: dict[str, Any], _: Auth, db: Db):
     if existing and _published_route_locked(db, existing):
         raise HTTPException(409, "published_route_locked")
     city_data = dict(payload.get("city") or {})
+    city_adcode = city_data.pop("adcode", None)
     city_id = str(city_data.pop("id", "")).strip()
     if not city_id:
         raise HTTPException(422, "city.id 必填")
@@ -5196,6 +5272,8 @@ def import_fragmented_route(payload: dict[str, Any], _: Auth, db: Db):
     else:
         for key, value in city_data.items():
             setattr(city, key, value)
+    db.flush()
+    enqueue(db, city, city_adcode)
     route_data = dict(payload.get("route") or {})
     route_id = str(route_data.get("id") or "").strip()
     if not route_id:

@@ -95,6 +95,7 @@ class Route(Base):
     distance_km: Mapped[float] = mapped_column(Float)
     difficulty: Mapped[str] = mapped_column(String(40))
     theme: Mapped[str] = mapped_column(String(80))
+    map_category: Mapped[str | None] = mapped_column(String(20), nullable=True)
     hero_image: Mapped[str] = mapped_column(String(255))
     is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
     content_status: Mapped[str] = mapped_column(String(40), default="draft")
@@ -694,3 +695,19 @@ class ClientRuntimeLog(Base):
     source: Mapped[str] = mapped_column(String(120), index=True)
     context_json: Mapped[dict] = mapped_column(JSON)
     truncated: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class CityMap(Base):
+    __tablename__ = "city_maps"
+
+    city_id: Mapped[str] = mapped_column(ForeignKey("cities.id", ondelete="CASCADE"), primary_key=True)
+    adcode: Mapped[str | None] = mapped_column(String(6), nullable=True)
+    status: Mapped[str] = mapped_column(String(24), default="pending")
+    object_key: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    district_count: Mapped[int] = mapped_column(Integer, default=0)
+    error: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    lease_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

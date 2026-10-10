@@ -28,6 +28,7 @@ type City = {
   name: string;
   subtitle: string;
   hero_image: string;
+  map?: { status: string; adcode: string | null; error?: string; district_count: number };
   latitude: number;
   longitude: number;
 };
@@ -399,6 +400,15 @@ export default function AdminApp() {
     [apiBase, token],
   );
 
+  useEffect(() => {
+    if (!connected || active !== "cities") return;
+    let live = true;
+    const timer = window.setInterval(() => {
+      request<City[]>("/cities").then((next) => { if (live) setCities(next); }).catch(() => {});
+    }, 5000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [active, connected, request]);
+
   const loadAll = useCallback(
     async (override?: { base: string; token: string }) => {
       setLoading(true);
@@ -671,6 +681,12 @@ export default function AdminApp() {
               <CitiesView
                 rows={cities}
                 routes={routes}
+                onRetry={async (city) => {
+                  try {
+                    await request(`/cities/${city.id}/map/retry`, { method: "POST" });
+                    await refresh();
+                  } catch (error) { setNotice(error instanceof Error ? error.message : "重试失败"); }
+                }}
                 onEdit={(item) => setEditor({ kind: "city", item })}
                 onDelete={(item) => remove("city", item.id, item.name)}
               />
@@ -895,11 +911,13 @@ function DashboardView({
 function CitiesView({
   rows,
   routes,
+  onRetry,
   onEdit,
   onDelete,
 }: {
   rows: City[];
   routes: Route[];
+  onRetry: (city: City) => Promise<void>;
   onEdit: (x: City) => void;
   onDelete: (x: City) => void;
 }) {
@@ -916,7 +934,13 @@ function CitiesView({
                 {item.latitude.toFixed(4)}, {item.longitude.toFixed(4)} ·{" "}
                 {routes.filter((x) => x.city_id === item.id).length} 条路线
               </small>
+              <p className="city-map-state" role="status">
+                {item.map?.status === "ready" ? `底图已就绪 · ${item.map.district_count} 个区县` :
+                  item.map?.status === "needs_city" ? "请选择行政城市" :
+                  item.map?.status === "failed" ? "底图获取失败，将自动重试" : "底图准备中"}
+              </p>
             </div>
+            {item.map?.status === "failed" && <button className="ghost-button" onClick={() => void onRetry(item)}>重试底图</button>}
             <code>{item.slug}</code>
             <RowActions
               onEdit={() => onEdit(item)}
@@ -1847,8 +1871,8 @@ function ScenicNodesWorkspace({
               <Field label="故事文案"><textarea name="story_content" rows={7} defaultValue={str(fragment.narration_script || fragment.transcript)} required /></Field>
               <Field label="地址"><input name="address" defaultValue={str(stop.address)} required /></Field>
               <div className="form-grid three">
-                <Field label="纬度"><input name="latitude" type="number" step="any" defaultValue={num(stop.latitude, num(region.latitude))} required /></Field>
-                <Field label="经度"><input name="longitude" type="number" step="any" defaultValue={num(stop.longitude, num(region.longitude))} required /></Field>
+                <Field label="纬度"><input name="latitude" type="number" step="any" defaultValue={stop.latitude == null && region.latitude == null ? "" : num(stop.latitude, num(region.latitude, 0))} required /></Field>
+                <Field label="经度"><input name="longitude" type="number" step="any" defaultValue={stop.longitude == null && region.longitude == null ? "" : num(stop.longitude, num(region.longitude, 0))} required /></Field>
                 <Field label="到达半径（米）"><input name="arrival_radius_m" type="number" min="1" defaultValue={num(stop.arrival_radius_m, num(region.entry_radius_m, 60))} required /></Field>
               </div>
               <TagEditor name="experience_tags" tags={stringList(fragment.experience_tags)} />
@@ -4020,8 +4044,10 @@ function EditorDialog({
     if (editor.kind === "city") {
       payload.latitude = Number(payload.latitude);
       payload.longitude = Number(payload.longitude);
+      payload.adcode = payload.adcode || null;
     }
     if (editor.kind === "route") {
+      payload.map_category = payload.map_category || null;
       payload.slug = payload.slug || str(item.slug) || `scenic-${Date.now().toString(36)}`;
       payload.subtitle = payload.subtitle || str(item.subtitle) || String(payload.title || "");
       payload.difficulty = payload.difficulty || str(item.difficulty) || "轻松";
@@ -4077,7 +4103,7 @@ function EditorDialog({
           </button>
         </div>
         <form className="editor-form" onSubmit={submit}>
-          {editor.kind === "city" && <CityFields item={item} media={media} />}
+          {editor.kind === "city" && <CityFields item={item} media={media} request={request} />}
           {editor.kind === "route" && (
             <RouteFields item={item} cities={cities} media={media} />
           )}
@@ -4098,53 +4124,50 @@ function EditorDialog({
   );
 }
 
-function CityFields({ item, media }: { item: Data; media: Media[] }) {
-  return (
-    <>
-      <div className="form-grid">
-        <Field label="城市名称">
-          <input name="name" defaultValue={str(item.name)} required />
-        </Field>
-        <Field label="英文标识">
-          <input
-            name="slug"
-            defaultValue={str(item.slug)}
-            placeholder="shanghai"
-            required
-          />
-        </Field>
-      </div>
-      <Field label="城市副标题">
-        <input name="subtitle" defaultValue={str(item.subtitle)} required />
-      </Field>
-      <MediaField
-        name="hero_image"
-        label="城市封面路径"
-        value={str(item.hero_image)}
-        media={media}
-      />
-      <div className="form-grid">
-        <Field label="纬度">
-          <input
-            name="latitude"
-            type="number"
-            step="any"
-            defaultValue={num(item.latitude, 31.2304)}
-            required
-          />
-        </Field>
-        <Field label="经度">
-          <input
-            name="longitude"
-            type="number"
-            step="any"
-            defaultValue={num(item.longitude, 121.4737)}
-            required
-          />
-        </Field>
-      </div>
-    </>
-  );
+type MapCityChoice = { adcode: string; name: string; province: string; latitude: number; longitude: number };
+function CityFields({ item, media, request }: {
+  item: Data; media: Media[];
+  request: <T>(p: string, i?: RequestInit) => Promise<T>;
+}) {
+  const [name, setName] = useState(str(item.name));
+  const [slug, setSlug] = useState(str(item.slug));
+  const [adcode, setAdcode] = useState(str((item.map as Data | undefined)?.adcode));
+  const [latitude, setLatitude] = useState(item.latitude == null ? "" : String(item.latitude));
+  const [longitude, setLongitude] = useState(item.longitude == null ? "" : String(item.longitude));
+  const [choices, setChoices] = useState<MapCityChoice[]>([]);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      request<MapCityChoice[]>(`/map-cities?q=${encodeURIComponent(name)}`, { signal: controller.signal })
+        .then((rows) => { if (!controller.signal.aborted) { setChoices(rows); setError(""); } })
+        .catch(() => { if (!controller.signal.aborted) setError("城市目录暂时无法加载，请稍后重试"); });
+    }, 250);
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [name, request]);
+  return <>
+    <Field label="城市名称 · 搜索后选择">
+      <input name="name" value={name} required autoComplete="off" onChange={(event) => {
+        setName(event.target.value); setAdcode(""); setLatitude(""); setLongitude("");
+      }} />
+    </Field>
+    <input type="hidden" name="adcode" value={adcode} />
+    {!adcode && name.trim() && <div className="map-city-choices" aria-label="匹配的行政城市">
+      {choices.map((city) => <button type="button" className="ghost-button" key={city.adcode} onClick={() => {
+        setName(city.name); setAdcode(city.adcode);
+        if (!slug) setSlug(`city-${city.adcode}`);
+        setLatitude(String(city.latitude)); setLongitude(String(city.longitude));
+      }}>{city.province} · {city.name}</button>)}
+    </div>}
+    <p className="field-help" role="status">{error || (adcode ? "已匹配行政城市，保存后自动准备底图，无需绘制。" : "选择城市后自动填写中心位置；未匹配时请检查城市全称。")}</p>
+    <Field label="城市标识"><input name="slug" value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="选择城市后自动填写" required /></Field>
+    <Field label="城市副标题"><input name="subtitle" defaultValue={str(item.subtitle)} required /></Field>
+    <MediaField name="hero_image" label="城市封面路径" value={str(item.hero_image)} media={media} />
+    <div className="form-grid">
+      <Field label="城市中心纬度"><input name="latitude" type="number" step="any" min="-85" max="85" value={latitude} onChange={(e) => setLatitude(e.target.value)} required /></Field>
+      <Field label="城市中心经度"><input name="longitude" type="number" step="any" min="-180" max="180" value={longitude} onChange={(e) => setLongitude(e.target.value)} required /></Field>
+    </div>
+  </>;
 }
 function RouteFields({
   item,
@@ -4161,6 +4184,14 @@ function RouteFields({
         <select name="city_id" defaultValue={str(item.city_id)} required>
           <option value="">请选择</option>
           {cities.map((x) => <option value={x.id} key={x.id}>{x.name}</option>)}
+        </select>
+      </Field>
+      <Field label="地图分类">
+        <select name="map_category" defaultValue={str(item.map_category)}>
+          <option value="">自动识别（兼容已有内容）</option>
+          <option value="coast">海边</option><option value="nature">山野</option>
+          <option value="streets">街巷</option><option value="architecture">建筑</option>
+          <option value="park">公园</option><option value="other">其他</option>
         </select>
       </Field>
       <Field label="景点名称">
@@ -4244,7 +4275,7 @@ function StopFields({
             name="latitude"
             type="number"
             step="any"
-            defaultValue={num(item.latitude, 31.2304)}
+            defaultValue={item.latitude == null ? "" : Number(item.latitude)}
             required
           />
         </Field>
@@ -4253,7 +4284,7 @@ function StopFields({
             name="longitude"
             type="number"
             step="any"
-            defaultValue={num(item.longitude, 121.4737)}
+            defaultValue={item.longitude == null ? "" : Number(item.longitude)}
             required
           />
         </Field>
