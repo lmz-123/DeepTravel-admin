@@ -10,6 +10,7 @@ import {
   useRef,
   useState,
 } from "react";
+import TravelPreparationEditor, { type TravelPreparation } from "./TravelPreparationEditor.tsx";
 import LogConsole from "./logs/LogConsole.tsx";
 
 type Tab =
@@ -33,6 +34,7 @@ type City = {
   longitude: number;
 };
 type Route = {
+  travel_preparation?: TravelPreparation | null;
   id: string;
   city_id: string;
   city_name?: string;
@@ -1635,6 +1637,7 @@ function ScenicContentWorkspace({
         </div>
       )}
       {selected && <>
+        <TravelPreparationEditor key={`preparation-${routeId}-${JSON.stringify(selected.travel_preparation)}`} route={selected} request={request} setNotice={setNotice} onChanged={onChanged} />
         <ScenicNodesWorkspace
           key={`nodes-${routeId}`}
           route={selected}

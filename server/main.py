@@ -92,6 +92,7 @@ from runtime_logs.storage import (
     query_client_events,
 )
 from runtime_logs.streaming import StreamLimiter, limited_stream, sse_message
+from travel_preparation import TravelPreparationInput
 from schemas import ChallengeInput, CityInput, ClientLogBatch, RouteInput, StopInput
 from sqlalchemy import create_engine, delete, func, inspect, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -347,6 +348,7 @@ def route_dict(
         "difficulty": item.difficulty,
         "theme": item.theme,
         "map_category": item.map_category,
+        "travel_preparation": item.travel_preparation,
         "hero_image": item.hero_image,
         "is_featured": item.is_featured,
         "content_status": item.content_status,
@@ -1847,7 +1849,7 @@ def list_routes(_: Auth, db: Db, city_id: str | None = None, q: str = ""):
 def create_route(payload: RouteInput, _: Auth, db: Db):
     if not db.get(City, payload.city_id):
         raise HTTPException(400, "所选城市不存在")
-    values = payload.model_dump()
+    values = payload.model_dump(mode="json")
     values["content_status"] = "draft"
     values["published_at"] = None
     item = Route(id=str(uuid4()), **values)
@@ -1863,12 +1865,26 @@ def update_route(item_id: str, payload: RouteInput, _: Auth, db: Db):
         raise HTTPException(404, "路线不存在")
     if item.managed_package_id and _published_route_locked(db, item):
         raise HTTPException(409, "published_route_locked")
-    values = payload.model_dump()
+    values = payload.model_dump(mode="json")
+    if "travel_preparation" not in payload.model_fields_set:
+        values.pop("travel_preparation", None)
     values["content_status"] = item.content_status
     values["published_at"] = item.published_at
     for key, value in values.items():
         setattr(item, key, value)
     commit_or_conflict(db, "路线标识或字段与现有内容冲突")
+    return route_dict(item)
+
+
+@app.put("/api/admin/routes/{item_id}/travel-preparation")
+def update_travel_preparation(item_id: str, payload: TravelPreparationInput, _: Auth, db: Db):
+    item = db.get(Route, item_id)
+    if not item:
+        raise HTTPException(404, "景点不存在")
+    # Logistics can change independently of the locked narrative publication.
+    # The public API still exposes only published routes.
+    item.travel_preparation = payload.model_dump(mode="json")
+    commit_or_conflict(db, "游玩准备保存失败")
     return route_dict(item)
 
 
@@ -4273,7 +4289,9 @@ def import_content(payload: dict[str, Any], _: Auth, db: Db):
                 or db.scalar(select(Route.id).where(Route.slug == data.slug))
                 or str(uuid4())
             )
-            values = data.model_dump()
+            values = data.model_dump(mode="json")
+            if "travel_preparation" not in data.model_fields_set:
+                values.pop("travel_preparation", None)
             values["content_status"] = "draft"
             values["published_at"] = None
             upsert(db, Route, route_id, values)
@@ -4629,6 +4647,11 @@ def _replace_route_content(db: Session, route: Route, graph: dict[str, Any]) -> 
         None, "coast", "nature", "streets", "architecture", "park", "other"
     ):
         raise HTTPException(422, "地图分类无效")
+    if "travel_preparation" in route_data:
+        try:
+            route.travel_preparation = TravelPreparationInput.model_validate(route_data["travel_preparation"] or {}).model_dump(mode="json")
+        except ValueError as exc:
+            raise HTTPException(422, "游玩准备配置无效") from exc
     for key in (
         "slug",
         "title",

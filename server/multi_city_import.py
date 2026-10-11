@@ -567,7 +567,9 @@ def _values(collection: str, raw: dict[str, Any]) -> dict[str, Any]:
         return {"id": identity, **validated.model_dump(exclude={"adcode"})}
     if collection == "routes":
         identity = values.pop("id")
-        validated = RouteInput.model_validate(values).model_dump()
+        validated = RouteInput.model_validate(values).model_dump(mode="json")
+        if "travel_preparation" not in values:
+            validated.pop("travel_preparation", None)
         return {
             "id": identity,
             **validated,

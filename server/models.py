@@ -96,6 +96,7 @@ class Route(Base):
     difficulty: Mapped[str] = mapped_column(String(40))
     theme: Mapped[str] = mapped_column(String(80))
     map_category: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    travel_preparation: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     hero_image: Mapped[str] = mapped_column(String(255))
     is_featured: Mapped[bool] = mapped_column(Boolean, default=False)
     content_status: Mapped[str] = mapped_column(String(40), default="draft")

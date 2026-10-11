@@ -7,6 +7,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from content_schema import normalize_experience_tags
+from travel_preparation import TravelPreparationInput
 
 
 class CityInput(BaseModel):
@@ -20,6 +21,7 @@ class CityInput(BaseModel):
 
 
 class RouteInput(BaseModel):
+    travel_preparation: TravelPreparationInput | None = None
     map_category: Literal["coast", "nature", "streets", "architecture", "park", "other"] | None = None
     city_id: str
     slug: str = Field(min_length=1, max_length=120)
