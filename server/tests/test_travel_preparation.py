@@ -89,5 +89,22 @@ class TravelPreparationApiTests(unittest.TestCase):
         self.assertEqual(response.status_code,422)
         with self.main.SessionLocal() as db:
             self.assertEqual(db.get(Route,'travel-route').travel_preparation['purchase_url'],data['purchase_url'])
+        from unittest.mock import patch
+        parsed = {'title':'成人票','price':'120','purchase_url':data['purchase_url']}
+        preview_endpoint='/api/admin/routes/travel-route/ticket-preview'
+        self.assertEqual(self.client.post(preview_endpoint,json=data).status_code,401)
+        with patch.object(self.main,'discover_tickets',return_value={'tickets':[parsed],'status':'parsed','message':'已解析'}) as discover:
+            preview=self.client.post(preview_endpoint,json=data,headers=headers)
+            self.assertEqual(preview.json()['tickets'][0]['title'],'成人票')
+            result=self.client.put(endpoint,json=data,headers=headers)
+            self.assertEqual(result.json()['travel_preparation']['tickets'][0]['title'],'成人票')
+            edited={**data,'tickets':[{'title':'人工核对票','price':''}], 'purchase_url':'https://official.example/new'}
+            result=self.client.put(endpoint,json=edited,headers=headers)
+            self.assertEqual(result.json()['travel_preparation']['tickets'][0]['title'],'人工核对票')
+            self.assertEqual(discover.call_count,2)
+        with patch.object(self.main,'discover_tickets',return_value={'tickets':[],'status':'link_only','message':'未解析'}):
+            result=self.client.put(endpoint,json={**data,'purchase_url':'https://official.example/changed'},headers=headers)
+            self.assertEqual(result.json()['travel_preparation']['tickets'],[])
+            self.assertTrue(result.json()['travel_preparation']['purchase_url'])
         response=self.client.put(endpoint,json={'enabled':False},headers=headers)
         self.assertFalse(response.json()['travel_preparation']['enabled'])

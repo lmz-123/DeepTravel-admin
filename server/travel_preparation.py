@@ -1,4 +1,4 @@
-"""Editorial travel preparation. Links are reviewed, never scraped or priced."""
+"""Editorial travel preparation. Reviewed links and public ticket previews."""
 from datetime import date
 from ipaddress import ip_address
 from typing import Literal
@@ -44,6 +44,21 @@ class PreparationItem(BaseModel):
         return self
 
 
+class TicketOption(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    title: str = Field(min_length=1, max_length=80)
+    subtitle: str = Field(default="", max_length=160)
+    price: str = Field(default="", max_length=16, pattern=r"^(?:[0-9]{1,6}(?:\.[0-9]{1,2})?)?$")
+    description: str = Field(default="", max_length=4000)
+    audience: str = Field(default="", max_length=2000)
+    entry_time: str = Field(default="", max_length=2000)
+    refund_policy: str = Field(default="", max_length=2000)
+    purchase_url: str = Field(default="", max_length=2000)
+    source_url: str = Field(default="", max_length=2000)
+    checked_at: str = Field(default="", max_length=80)
+    _urls = field_validator("purchase_url", "source_url")(public_https)
+
+
 class TravelPreparationInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     enabled: bool = False
@@ -59,6 +74,8 @@ class TravelPreparationInput(BaseModel):
     transport_url: str = Field(default="", max_length=2000)
     notices: str = Field(default="", max_length=4000)
     notices_url: str = Field(default="", max_length=2000)
+    tickets: list[TicketOption] = Field(default_factory=list, max_length=30)
+    ticket_sync: Literal["auto", "manual"] = "auto"
     extra_items: list[PreparationItem] = Field(default_factory=list, max_length=8)
 
     _urls = field_validator("purchase_url", "source_url", "opening_url", "transport_url", "notices_url")(public_https)

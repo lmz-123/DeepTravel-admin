@@ -93,6 +93,7 @@ from runtime_logs.storage import (
 )
 from runtime_logs.streaming import StreamLimiter, limited_stream, sse_message
 from travel_preparation import TravelPreparationInput
+from ticket_discovery import discover_tickets
 from schemas import ChallengeInput, CityInput, ClientLogBatch, RouteInput, StopInput
 from sqlalchemy import create_engine, delete, func, inspect, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -1876,6 +1877,15 @@ def update_route(item_id: str, payload: RouteInput, _: Auth, db: Db):
     return route_dict(item)
 
 
+@app.post("/api/admin/routes/{item_id}/ticket-preview")
+def preview_tickets(item_id: str, payload: TravelPreparationInput, _: Auth, db: Db):
+    if not db.get(Route, item_id):
+        raise HTTPException(404, "景点不存在")
+    if not payload.purchase_url:
+        raise HTTPException(422, "请先填写官方购票链接")
+    return discover_tickets(payload.purchase_url)
+
+
 @app.put("/api/admin/routes/{item_id}/travel-preparation")
 def update_travel_preparation(item_id: str, payload: TravelPreparationInput, _: Auth, db: Db):
     item = db.get(Route, item_id)
@@ -1883,7 +1893,14 @@ def update_travel_preparation(item_id: str, payload: TravelPreparationInput, _: 
         raise HTTPException(404, "景点不存在")
     # Logistics can change independently of the locked narrative publication.
     # The public API still exposes only published routes.
-    item.travel_preparation = payload.model_dump(mode="json")
+    value = payload.model_dump(mode="json")
+    previous = item.travel_preparation or {}
+    changed_url = previous.get("purchase_url") != payload.purchase_url
+    if payload.enabled and payload.admission in ("ticket", "reservation") and payload.ticket_sync == "auto" and payload.purchase_url and (not payload.tickets or (changed_url and value["tickets"] == previous.get("tickets", []))):
+        result = discover_tickets(payload.purchase_url)
+        # Never retain another venue's ticket types after changing its link.
+        value["tickets"] = result["tickets"]
+    item.travel_preparation = value
     commit_or_conflict(db, "游玩准备保存失败")
     return route_dict(item)
 
